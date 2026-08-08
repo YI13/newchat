@@ -54,6 +54,7 @@ export const SKIP = {
   NonTextual: 'non-textual',
   RateLimited: 'rate-limited',
   CircuitOpen: 'circuit-open',
+  InternalError: 'internal-error',
 }
 
 const HAS_LETTER = /\p{L}/u
@@ -143,8 +144,24 @@ export function createAutoPolicy({
    * Called once per message the user has dwelled on. Returns `{ skipped }`
    * with a reason, or the store's outcome. Automatic failures are silent by
    * design: the message simply stays in its source language.
+   *
+   * Never rejects. Both callers — the dwell timer and the sweep interval —
+   * fire without a catch, so a rejection here (a broken IndexedDB rejecting
+   * the first cache read, say) would surface as one unhandled rejection per
+   * second, forever. An internal error becomes a logged skip and nothing
+   * more: it says nothing about the backend, so it must not feed the
+   * circuit breaker either.
    */
   async function onCandidate(messageId) {
+    try {
+      return await offerCandidate(messageId)
+    } catch (err) {
+      log.emit(DECISION.Skip, messageId, { reason: SKIP.InternalError, error: err })
+      return { skipped: SKIP.InternalError }
+    }
+  }
+
+  async function offerCandidate(messageId) {
     const skip = (reason, fields) => {
       log.emit(DECISION.Skip, messageId, { reason, ...fields })
       return { skipped: reason }
@@ -237,9 +254,22 @@ export function createAutoPolicy({
   async function recheckVisible() {
     const ids = getVisibleIds?.()
     if (!ids) return
+
+    // Checked here, silently, before any per-message work. The sweep fires
+    // every second for as long as the page lives; while the switch is off or
+    // the page is hidden, logging a skip per visible message per tick would
+    // churn the decision log's whole buffer in minutes — evicting exactly
+    // the history a diagnosis needs.
+    const ctx = getContext()
+    if (!ctx.autoTranslate || !ctx.active) return
+
     for (const id of ids) {
       if (store.getEntry(id).status !== 'idle') continue
-      await onCandidate(id)
+      // Fire-and-forget: onCandidate resolves when the translation SETTLES,
+      // so awaiting it here would repair one message per tick instead of one
+      // sweep. Deduplication is the store's status check above, not this
+      // loop's ordering — and onCandidate never rejects.
+      onCandidate(id)
     }
   }
 

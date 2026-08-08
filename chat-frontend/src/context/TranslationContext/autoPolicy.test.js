@@ -1,5 +1,6 @@
 import { describe, expect, test, vi } from 'vitest'
 import { AUTO_TRANSLATE_CONFIG, SKIP, createAutoPolicy } from './autoPolicy'
+import { createDecisionLog } from './decisionLog'
 
 function message(overrides = {}) {
   return {
@@ -44,6 +45,7 @@ function makePolicy(overrides = {}) {
       ...overrides.context,
     }),
     config: overrides.config,
+    log: overrides.log,
     now,
   })
 
@@ -477,5 +479,84 @@ describe('every declared knob is wired', () => {
       'skipNonTextual', // autoPolicy
     ]
     expect(Object.keys(AUTO_TRANSLATE_CONFIG).sort()).toEqual([...wired].sort())
+  })
+})
+
+describe('the policy never throws', () => {
+  test('a rejecting store read resolves as a logged skip, not an unhandled rejection', async () => {
+    // The dwell timer and the sweep interval both call onCandidate without a
+    // catch. A broken IndexedDB (private browsing, exhausted quota) rejects
+    // the very first cache read inside ensureForView — and would turn into
+    // one unhandled rejection per second, forever.
+    const log = createDecisionLog()
+    const { policy, ensureForView } = makePolicy({ log })
+    ensureForView.mockRejectedValue(Object.assign(new Error('idb gone'), { name: 'QuotaExceededError' }))
+
+    await expect(policy.onCandidate('m1')).resolves.toMatchObject({
+      skipped: SKIP.InternalError,
+    })
+    expect(log.records().at(-1)).toMatchObject({ kind: 'skip', reason: SKIP.InternalError })
+  })
+
+  test('an internal error does not feed the circuit breaker', async () => {
+    // The breaker models the BACKEND's health; a local cache failure says
+    // nothing about it, and counting it would let a broken IDB switch
+    // automatic translation off for a healthy backend.
+    const { policy, ensureForView } = makePolicy()
+    ensureForView.mockRejectedValue(new Error('idb gone'))
+
+    for (let i = 0; i < 6; i += 1) await policy.onCandidate('m1')
+
+    expect(policy.stats().consecutiveFailures).toBe(0)
+    expect(policy.stats().circuitOpen).toBe(false)
+  })
+})
+
+describe('sweep throughput and cost', () => {
+  test('offers every idle message without waiting for translations to finish', async () => {
+    // The sweep must hand out work, not chaperone it: onCandidate resolves
+    // when the translation SETTLES, so awaiting it repairs one message per
+    // tick instead of one sweep — a screen of 12 stranded messages takes 12
+    // seconds against a fast backend instead of one.
+    const h = makePolicy()
+    for (const id of ['a', 'b', 'c']) {
+      h.messages.set(id, message({ id }))
+      h.visible.add(id)
+    }
+    h.ensureForView.mockImplementation(async () => ({
+      outcome: 'queued',
+      done: new Promise(() => {}),
+      sent: Promise.resolve(true),
+    }))
+
+    await h.policy.recheckVisible()
+
+    expect(h.ensureForView).toHaveBeenCalledTimes(3)
+  })
+
+  test('a disabled switch costs no log records per tick', async () => {
+    // The sweep fires every second for as long as the page lives. Logging a
+    // skip per visible message per tick while auto is simply off would churn
+    // the decision log's whole buffer in about four minutes — evicting
+    // exactly the history a diagnosis needs.
+    const log = createDecisionLog()
+    const h = makePolicy({ log, context: { autoTranslate: false } })
+    h.visible.add('m1')
+
+    await h.policy.recheckVisible()
+
+    expect(h.ensureForView).not.toHaveBeenCalled()
+    expect(log.records()).toHaveLength(0)
+  })
+
+  test('a hidden page costs no log records per tick', async () => {
+    const log = createDecisionLog()
+    const h = makePolicy({ log, context: { active: false } })
+    h.visible.add('m1')
+
+    await h.policy.recheckVisible()
+
+    expect(h.ensureForView).not.toHaveBeenCalled()
+    expect(log.records()).toHaveLength(0)
   })
 })
