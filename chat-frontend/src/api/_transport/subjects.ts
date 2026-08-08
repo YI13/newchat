@@ -124,3 +124,11 @@ export function userSubscriptionList(account: string, siteId: string): string {
 export function userSubscriptionCount(account: string, siteId: string): string {
   return `chat.user.${account}.request.user.${siteId}.subscription.count`
 }
+
+// translateText translates one message body. Plain request/reply, so the
+// reply lands on the auto-generated inbox and the payload carries no
+// correlation id. `siteId` is the caller's own site: translation is
+// stateless and never crosses sites, so no origin-site rule applies.
+export function translateText(account: string, siteId: string): string {
+  return `chat.user.${account}.request.translate.${siteId}.text`
+}

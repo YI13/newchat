@@ -41,6 +41,26 @@ export const OTEL_DEPLOYMENT_ENVIRONMENT =
   import.meta.env.VITE_OTEL_DEPLOYMENT_ENVIRONMENT ||
   'local'
 
+// Translation transport. No translation service is deployed against this
+// stack, so the dev stub is the default. It answers on the same signature as
+// the real operation, which keeps the retry ladder, the queue and the abort
+// plumbing on their production code paths.
+// Set VITE_TRANSLATE_USE_STUB=false once a real backend is reachable.
+export const TRANSLATE_USE_STUB = boolConfig(
+  runtime.TRANSLATE_USE_STUB ?? import.meta.env.VITE_TRANSLATE_USE_STUB,
+  true,
+)
+
+// One of the six stub modes: normal | slow | no-reply | unavailable |
+// internal | identical. `slow` and `unavailable` are the useful ones — they
+// hold queue slots open and drive the retry ladder on demand.
+export const TRANSLATE_STUB_MODE =
+  runtime.TRANSLATE_STUB_MODE || import.meta.env.VITE_TRANSLATE_STUB_MODE || 'normal'
+
+export const TRANSLATE_STUB_DELAY_MS = Number(
+  runtime.TRANSLATE_STUB_DELAY_MS ?? import.meta.env.VITE_TRANSLATE_STUB_DELAY_MS ?? 250,
+)
+
 // Mirrors portal-service's BOT_LOGIN_ENABLED flag (surfaced via /api/settings
 // as botLoginEnabled). Default true: a missing flag (old portal, or a deploy
 // that hasn't wired the var yet) must not silently lock out bots that were

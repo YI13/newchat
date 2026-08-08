@@ -35,7 +35,14 @@ export { subscribeToRoomMetadataUpdates } from './subscribeToRoomMetadataUpdates
 export { subscribeToRoomKeyEvents } from './subscribeToRoomKeyEvents'
 export { subscribeToSubscriptionUpdates } from './subscribeToSubscriptionUpdates'
 export { subscribeToUserRoomEvents } from './subscribeToUserRoomEvents'
+export { translateText } from './translateText'
 export { updateMemberRole } from './updateMemberRole'
+
+export type {
+  TranslateTextArgs,
+  TranslateTextOptions,
+  TranslateTextResponse,
+} from './translateText'
 
 // Transport-level error utilities that callers legitimately need.
 // `_transport/` stays internal otherwise.
