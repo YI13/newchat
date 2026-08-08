@@ -1,6 +1,8 @@
 import { useNats } from '@/context/NatsContext'
 import SearchBar from './SearchBar/SearchBar'
 import ThemeToggle from './ThemeToggle/ThemeToggle'
+import TranslationControls from './TranslationControls'
+import TranslationDebugPanel from './TranslationDebugPanel'
 import DebugLevelSelect from './DebugLevelSelect/DebugLevelSelect'
 import DebugPayloadToggle from './DebugPayloadToggle/DebugPayloadToggle'
 import UnreadBadge from './UnreadBadge'
@@ -23,6 +25,8 @@ export default function AppHeader({ onSelectRoom, onEnterSearch }) {
       <span className="app-header-user">
         {user?.account} · {user?.siteId}
       </span>
+      <TranslationControls />
+      <TranslationDebugPanel />
       <DebugLevelSelect />
       <DebugPayloadToggle />
       <ThemeToggle />

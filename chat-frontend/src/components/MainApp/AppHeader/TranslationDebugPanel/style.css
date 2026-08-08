@@ -1,0 +1,137 @@
+/* Diagnostics for the automatic-translation queue. Anchored to its pill in
+   the header's dev-control strip; the panel floats so opening it never
+   reflows the header. */
+.tdp {
+  position: relative;
+}
+
+.tdp-pill {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  padding: var(--space-2xs) var(--space-xs);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  font-family: var(--font-mono, monospace);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.tdp-pill-alert {
+  border-color: var(--status-error);
+  color: var(--status-error);
+}
+
+.tdp-sep {
+  color: var(--border-subtle);
+}
+
+.tdp-alert-dot {
+  color: var(--status-error);
+}
+
+/* Right-aligned: the pill sits near the end of the header, and a
+   left-anchored panel would run off the viewport. */
+.tdp-panel {
+  position: absolute;
+  top: calc(100% + var(--space-2xs));
+  right: 0;
+  z-index: 50;
+  width: 620px;
+  max-height: 70vh;
+  overflow-y: auto;
+  padding: var(--space-sm);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  box-shadow: var(--shadow-lg, 0 8px 24px rgba(0, 0, 0, 0.18));
+  font-family: var(--font-mono, monospace);
+  font-size: var(--text-xs);
+  color: var(--text-primary);
+  text-align: left;
+}
+
+.tdp-actions {
+  display: flex;
+  gap: var(--space-xs);
+  margin-bottom: var(--space-sm);
+}
+
+.tdp-actions button {
+  padding: var(--space-2xs) var(--space-xs);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+
+.tdp-section {
+  margin-bottom: var(--space-sm);
+}
+
+.tdp-section h4 {
+  margin: 0 0 var(--space-2xs);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.tdp-empty {
+  color: var(--text-tertiary, var(--text-secondary));
+  font-style: italic;
+}
+
+.tdp-row,
+.tdp-record,
+.tdp-violation {
+  display: flex;
+  gap: var(--space-xs);
+  align-items: baseline;
+  padding: 1px 0;
+  line-height: 1.5;
+}
+
+.tdp-violation {
+  color: var(--status-error);
+}
+
+.tdp-dim {
+  color: var(--text-secondary);
+  /* The value column is the variable-width part; let it wrap rather than
+     widen the panel. */
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Fixed-width keyword columns so a fast-scrolling log stays scannable
+   vertically instead of jittering with each record's field lengths. */
+.tdp-status,
+.tdp-kind {
+  display: inline-block;
+  flex: none;
+  width: 74px;
+  color: var(--text-secondary);
+}
+
+.tdp-status-loading,
+.tdp-kind-send {
+  color: var(--status-info, var(--text-primary));
+  font-weight: 600;
+}
+
+.tdp-kind-skip,
+.tdp-kind-drop {
+  color: var(--text-tertiary, var(--text-secondary));
+}
+
+.tdp-kind-violation {
+  color: var(--status-error);
+  font-weight: 600;
+}

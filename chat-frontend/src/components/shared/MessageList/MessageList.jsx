@@ -1,6 +1,7 @@
-import { useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
 import MessageRow from './MessageRow/MessageRow'
 import SystemMessage from './SystemMessage/SystemMessage'
+import { useAutoTranslateScrollRoot } from '@/context/TranslationContext'
 import './style.css'
 
 export default function MessageList({
@@ -29,6 +30,17 @@ export default function MessageList({
   const localBottomRef = useRef(null)
   const effectiveBottomRef = bottomRef ?? localBottomRef
 
+  // This element is what actually scrolls, so intersection has to be measured
+  // against it rather than the document.
+  const setScrollRoot = useAutoTranslateScrollRoot()
+  const attachList = useCallback(
+    (element) => {
+      listRef.current = element
+      setScrollRoot(element)
+    },
+    [setScrollRoot],
+  )
+
   useEffect(() => {
     if (!focusMessageId || !listRef.current) return
     const el = listRef.current.querySelector(`[data-message-id="${focusMessageId}"]`)
@@ -55,7 +67,7 @@ export default function MessageList({
   return (
     <div
       className="message-list"
-      ref={listRef}
+      ref={attachList}
       {...(ariaLive ? { 'aria-live': ariaLive } : {})}
     >
       {historyLoading && <div className="message-loading">Loading messages…</div>}
