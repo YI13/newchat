@@ -276,3 +276,32 @@ describe('reporting shape', () => {
     expect(JSON.stringify(snapshot)).toBe(before)
   })
 })
+
+describe('queue ceiling scope', () => {
+  test('manual jobs waiting past the ceiling are not a violation', () => {
+    // The ceiling governs background work only — an explicit request is
+    // never refused, so a saturated gate legitimately queues more manual
+    // jobs than maxQueueLength. Counting them made the checker cry wolf on
+    // exactly the behaviour the store promises.
+    const queue = Array.from({ length: 5 }, (_, i) => ({
+      messageId: `m${i}`,
+      origin: 'manual',
+      enqueuedAt: NOW,
+    }))
+    const entries = queue.map((q) => ({ messageId: q.messageId, status: 'queued', since: NOW }))
+
+    const violations = checkInvariants(
+      snap({
+        config: { maxConcurrent: 1, maxConcurrentAuto: 1, maxQueueLength: 3 },
+        queue,
+        entries,
+        activeCount: 1,
+        activeAutoCount: 0,
+        inflight: [{ messageId: 'x', sentAt: NOW }],
+      }),
+      { now: NOW },
+    )
+
+    expect(codes(violations)).not.toContain(INVARIANT.QueueOverLimit)
+  })
+})

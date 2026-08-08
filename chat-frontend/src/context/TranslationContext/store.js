@@ -81,6 +81,8 @@ export function createTranslationStore({
   const entries = new Map()
   const listeners = new Set()
   const inflight = new Map()
+  /** One record per job currently HOLDING a slot — see runJob. */
+  const running = new Set()
   const queue = []
   let activeCount = 0
   let activeAutoCount = 0
@@ -110,12 +112,30 @@ export function createTranslationStore({
   }
 
   /** Cancel any in-flight request for this message and invalidate its
-   *  generation, so a reply already on the wire can no longer be applied. */
+   *  generation, so a reply already on the wire can no longer be applied.
+   *
+   *  Also purges the message's QUEUED job, which has no controller to abort:
+   *  left in place it would eventually send a request whose reply is
+   *  unusable — for a reverted message, one the user explicitly declined —
+   *  and its 'superseded' settle would read as a success to the policy's
+   *  failure accounting. (Found by the chaos harness: reverting a queued
+   *  message left a ghost job that still reached the wire.) */
   function invalidate(messageId) {
     const current = inflight.get(messageId)
     if (current) {
       inflight.delete(messageId)
       current.controller.abort()
+    }
+    for (let i = queue.length - 1; i >= 0; i -= 1) {
+      if (queue[i].messageId !== messageId) continue
+      const [item] = queue.splice(i, 1)
+      log.emit(DECISION.Drop, messageId, {
+        reason: 'superseded',
+        origin: item.origin,
+        queued: queue.length,
+      })
+      item.markSent(false)
+      item.settle({ ok: false, superseded: true })
     }
     generation += 1
     return generation
@@ -190,6 +210,15 @@ export function createTranslationStore({
     if (isAuto) activeAutoCount += 1
     const controller = new AbortController()
     const sentAt = now()
+    // The slot ledger, per JOB. The inflight map cannot serve this purpose:
+    // it is keyed by messageId, and during a supersede two requests for the
+    // same message are genuinely outstanding at once — the aborted-but-alive
+    // old one (the transport cannot cancel mid-flight) and the new one. A
+    // per-message map undercounts that, which made the slot-leak invariant
+    // fire on every supersede window. This record lives exactly as long as
+    // the slot: added here, removed in release().
+    const slotRecord = { messageId: item.messageId, origin: item.origin, sentAt }
+    running.add(slotRecord)
     inflight.set(item.messageId, {
       controller,
       reqSeq: item.reqSeq,
@@ -208,6 +237,7 @@ export function createTranslationStore({
       released = true
       activeCount -= 1
       if (isAuto) activeAutoCount -= 1
+      running.delete(slotRecord)
       pump()
     }
 
@@ -431,6 +461,13 @@ export function createTranslationStore({
       (IN_PROGRESS.has(current.status) || current.status === 'translated')
     if (settledForThisView) return { outcome: 'settled' }
 
+    // This function is not atomic: between here and the enqueue sit two
+    // cache reads, and a revert or an edit can land inside that window. The
+    // sequence captured now is re-checked before the enqueue — losing that
+    // race must mean standing down, or the enqueue takes a fresh generation
+    // and translates a message whose user just said "see original".
+    const seqAtStart = current.reqSeq
+
     const intent = await cache.intent.get(messageId)
     if (intent === 'off') {
       log.emit(DECISION.Suppressed, messageId, { reason: 'see-original' })
@@ -444,6 +481,16 @@ export function createTranslationStore({
     }
 
     const cached = await cache.content.get(messageId, { targetLang, srcVersion })
+
+    // The atomicity re-check, placed BEFORE the cached branch: a cache hit
+    // writes 'translated' into the entry, which would overwrite a revert
+    // just as surely as a fresh request would. A moved sequence means
+    // somebody — a revert, an edit, another request — changed this message's
+    // state while the reads above were in flight; their decision is newer.
+    if (getEntry(messageId).reqSeq !== seqAtStart) {
+      return { outcome: 'superseded', sent: Promise.resolve(false) }
+    }
+
     if (cached) {
       setEntry(messageId, {
         status: 'translated',
@@ -520,8 +567,14 @@ export function createTranslationStore({
 
   async function onLogout() {
     for (const id of [...inflight.keys()]) invalidate(id)
+    // Same defect class as the invalidate purge: truncating the queue
+    // without settling its jobs leaves their promises pending forever, and a
+    // policy awaiting `sent` on one of them never learns the answer.
+    for (const item of queue.splice(0)) {
+      item.markSent(false)
+      item.settle({ ok: false, superseded: true })
+    }
     entries.clear()
-    queue.length = 0
     emit()
     await cache.clearAll()
   }
@@ -567,8 +620,11 @@ export function createTranslationStore({
         origin,
         enqueuedAt,
       })),
-      inflight: [...inflight.entries()].map(([messageId, job]) => ({
-        messageId,
+      // From the slot ledger, not the inflight map: this is what the
+      // slot-leak invariant compares activeCount against, and the two are
+      // mutated together synchronously.
+      inflight: [...running].map((job) => ({
+        messageId: job.messageId,
         origin: job.origin,
         sentAt: job.sentAt,
       })),

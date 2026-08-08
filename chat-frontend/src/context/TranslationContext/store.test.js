@@ -796,3 +796,128 @@ describe('reporting whether a request actually went out', () => {
     await expect(result.sent).resolves.toBe(false)
   })
 })
+
+describe('a queued job whose state moves on is purged, not run', () => {
+  test('reverting a queued message removes its job before it can be sent', async () => {
+    // invalidate() aborts the in-flight request, but a job still WAITING for
+    // a slot has no controller to abort — left in the queue it eventually
+    // sends a request whose reply is unusable, for a message the user
+    // explicitly asked to see in the original.
+    const { store, translate } = makeStore({ config: { maxConcurrent: 1 } })
+
+    store.translate('m1', job())
+    store.translate('m2', job())
+    await flush()
+    expect(store.stats().queued).toBe(1)
+
+    await store.revert('m2', 'r1')
+    expect(store.stats().queued).toBe(0)
+
+    translate.calls[0].resolve({ translatedText: '[ja] hello', targetLang: 'ja' })
+    await flush()
+    await flush()
+
+    expect(translate).toHaveBeenCalledTimes(1)
+    expect(store.getEntry('m2').status).toBe('idle')
+  })
+
+  test('switching language while queued replaces the job instead of stacking two', async () => {
+    const { store, translate } = makeStore({ config: { maxConcurrent: 1 } })
+
+    store.translate('m1', job())
+    store.translate('m2', job({ targetLang: 'ja' }))
+    await flush()
+    store.translate('m2', job({ targetLang: 'de' }))
+    await flush()
+
+    expect(store.stats().queued).toBe(1)
+
+    translate.calls[0].resolve({ translatedText: '[ja] hello', targetLang: 'ja' })
+    await flush()
+    await flush()
+
+    // Only the de job may reach the wire for m2.
+    const m2Calls = translate.calls.slice(1)
+    expect(m2Calls).toHaveLength(1)
+    expect(m2Calls[0].args.targetLang).toBe('de')
+  })
+
+  test('editing a message purges its queued job', async () => {
+    const { store, translate } = makeStore({ config: { maxConcurrent: 1 } })
+
+    store.translate('m1', job())
+    store.translate('m2', job())
+    await flush()
+
+    await store.onMessageEdited('m2')
+    expect(store.stats().queued).toBe(0)
+
+    translate.calls[0].resolve({ translatedText: '[ja] hello', targetLang: 'ja' })
+    await flush()
+    await flush()
+
+    expect(translate).toHaveBeenCalledTimes(1)
+  })
+
+  test('a purged job resolves as never-sent, so no budget is charged for it', async () => {
+    const { store } = makeStore({ config: { maxConcurrent: 1 } })
+
+    store.translate('m1', job())
+    const result = await store.ensureForView('m2', {
+      roomId: 'r1',
+      text: 'hello',
+      targetLang: 'ja',
+      srcVersion: 1,
+      autoTranslate: true,
+    })
+    expect(result.outcome).toBe('queued')
+
+    await store.revert('m2', 'r1')
+
+    await expect(result.sent).resolves.toBe(false)
+  })
+})
+
+describe('revert racing an in-progress view decision', () => {
+  test('a revert landing between the intent read and the enqueue wins', async () => {
+    // ensureForView is not atomic: intent read, then a content read (an IDB
+    // round trip), then the enqueue. A revert landing inside that window used
+    // to be overwritten — the enqueue took a fresh generation and translated
+    // a message whose user had just said "see original". Found by the chaos
+    // harness (seed 83).
+    const cache = makeCache()
+    let releaseContentRead
+    const gate = new Promise((r) => {
+      releaseContentRead = r
+    })
+    const gatedCache = {
+      ...cache,
+      intent: cache.intent,
+      content: {
+        ...cache.content,
+        get: async (...args) => {
+          await gate
+          return cache.content.get(...args)
+        },
+      },
+    }
+    const { store, translate } = makeStore({ cache: gatedCache })
+
+    const pending = store.ensureForView('m1', {
+      roomId: 'r1',
+      text: 'hello',
+      targetLang: 'ja',
+      srcVersion: 1,
+      autoTranslate: true,
+    })
+    await flush()
+
+    await store.revert('m1', 'r1')
+    releaseContentRead()
+    const result = await pending
+
+    expect(result.outcome).not.toBe('queued')
+    expect(translate).not.toHaveBeenCalled()
+    expect(store.getEntry('m1').status).toBe('idle')
+  })
+})

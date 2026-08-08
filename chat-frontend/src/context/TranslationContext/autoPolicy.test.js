@@ -560,3 +560,43 @@ describe('sweep throughput and cost', () => {
     expect(log.records()).toHaveLength(0)
   })
 })
+
+describe('probe concurrency', () => {
+  test('while one probe is in flight, further candidates stay blocked', async () => {
+    // The sequential probe test cannot see this: it lets each probe settle
+    // before the next candidate arrives, so the re-opened circuit does the
+    // blocking. The guard exists for the CONCURRENT case — cooldown elapsed,
+    // probe still on the wire — where without it every candidate on screen
+    // probes the recovering backend at once. Mutation testing found the gap.
+    const h = makePolicy({ config: { failureCircuitThreshold: 2 } })
+    for (const id of ['a', 'b', 'c']) h.messages.set(id, message({ id }))
+
+    h.ensureForView.mockImplementation(async () => ({
+      outcome: 'queued',
+      done: Promise.reject(Object.assign(new Error('boom'), { code: 'internal' })),
+      sent: Promise.resolve(true),
+    }))
+    await h.policy.onCandidate('a')
+    await h.policy.onCandidate('a')
+    expect(h.policy.stats().circuitOpen).toBe(true)
+
+    h.advance(30_001)
+    // The probe's translation never settles — it is still on the wire when
+    // the next candidates arrive.
+    h.ensureForView.mockImplementation(async () => ({
+      outcome: 'queued',
+      done: new Promise(() => {}),
+      sent: Promise.resolve(true),
+    }))
+    h.ensureForView.mockClear()
+
+    const probe = h.policy.onCandidate('a')
+    const second = await h.policy.onCandidate('b')
+    const third = await h.policy.onCandidate('c')
+
+    expect(h.ensureForView).toHaveBeenCalledTimes(1)
+    expect(second.skipped).toBe(SKIP.CircuitOpen)
+    expect(third.skipped).toBe(SKIP.CircuitOpen)
+    void probe
+  })
+})

@@ -95,13 +95,15 @@ function makeObserver(overrides = {}) {
 }
 
 describe('observer construction', () => {
-  test('never builds a negative rootMargin', () => {
+  test.each([250, -250])('never builds a negative rootMargin (prefetchMarginPx %i)', (px) => {
     // A negative rootMargin shrinks the intersection box. On most viewports
     // that makes the effective root height negative, so nothing ever
     // intersects and the feature silently does nothing. The failure mode is
     // "no candidates ever", which no behavioural test can tell apart from
-    // "correctly filtered", so assert the value directly.
-    const { observer } = makeObserver({ prefetchMarginPx: 250 })
+    // "correctly filtered", so assert the value directly. The negative input
+    // is the case that matters: a positive one passes with or without the
+    // clamp (mutation testing caught exactly that gap).
+    const { observer } = makeObserver({ prefetchMarginPx: px })
     observer.observe('m1', makeEl('m1'))
 
     const margin = latest().options.rootMargin ?? '0px'

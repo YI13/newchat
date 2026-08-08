@@ -109,12 +109,15 @@ export function checkInvariants(snapshot, { now = Date.now(), stallMs = DEFAULT_
     }
   }
 
-  // 0 means "no ceiling", matching the queue's own reading of it. Treating it
-  // as a ceiling of zero would report every queued job as a violation.
-  if (config.maxQueueLength && queue.length > config.maxQueueLength) {
+  // 0 means "no ceiling", matching the queue's own reading of it. And only
+  // automatic jobs count: an explicit request is never refused, so a
+  // saturated gate legitimately queues more manual jobs than the ceiling —
+  // counting them made this checker cry wolf on promised behaviour.
+  const autoQueued = queue.filter((item) => item.origin === 'auto').length
+  if (config.maxQueueLength && autoQueued > config.maxQueueLength) {
     add(
       INVARIANT.QueueOverLimit,
-      `queue holds ${queue.length} jobs against a declared ceiling of ${config.maxQueueLength}`,
+      `${autoQueued} automatic jobs queued against a declared ceiling of ${config.maxQueueLength}`,
     )
   }
 
