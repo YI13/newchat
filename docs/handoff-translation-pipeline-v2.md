@@ -115,7 +115,25 @@ decisionLog —— 決策只有交織在同一條時間軸上才可解讀。
 | 16 | 斷路器一打開,決策 log 就被洗光,查不到它為什麼跳 | 缺陷 8 的靜默 gate 只涵蓋 `autoTranslate`/`active`;`circuit-open`/`rate-limited` 同樣是**全域**狀態卻走 per-message 路徑,12 則可視訊息 × 1s sweep 在 167 秒內填滿整個 buffer,而冷卻是指數成長的 | 兩者併入 sweep 迴圈前的同一道靜默 gate。**前提是缺陷 14 已修** —— 述詞不純的話,sweep 每秒會偷走 probe token |
 | 17 | (潛在)`sent` promise 永不 settle,呼叫端連同 probe token 一起卡死 | `ensureForView` 對每個到達 `translateMessage` 的呼叫都回報 `outcome: 'queued'` 並交出 `sent`,但 dedupe 早退路徑不呼叫 `onSent` | dedupe 路徑補 `onSent?.(false)`,與下方 refuse 路徑對稱。在本版因 `settledForThisView` + reqSeq 重驗而不可達;**移植到沒有這兩道保護的 store 時直接可達** |
 
-> 缺陷 14–17 的失效形狀都是「自動翻譯靜默停止」,和缺陷 1、2 的使用者回報**無法區分**。
+> **14、15、16 在本版就會發生,不需要任何移植情境。** 快取沒有任何 try/catch
+> (`idbTranslationCache/index.js` 全檔 0 個),`content.set` 直接 `put`,Dexie
+> 在配額耗盡、DB 被封鎖、Safari 私密模式下會 reject —— 這同時讓 15 成立,也讓
+> 14 的 throw 路徑成立(`ensureForView` 的兩次 cache 讀取一樣沒有保護,例外
+> 會帶著已佔用的 probe token 一路穿到 `onCandidate` 的 catch)。
+>
+> 兩者串起來是一條無法自我恢復的鏈:後端回覆正確 → IDB 寫入 reject → 譯文被
+> 丟棄、顯示失敗 → 計入斷路器 → 五則後斷路器打開 → 下一個 probe 在同一個地方
+> throw → token 洩漏 → **整個 session 自動翻譯關閉**,全程後端健康、無任何錯誤。
+>
+> 16 只需要一次後端故障:sweep 每秒 × 12 則可視訊息,2000 筆 buffer 在 167 秒
+> 內洗光,而冷卻是指數成長的 —— 故障期間正是最需要 log 的時候,而 log 在故障
+> 期間自我銷毀。
+>
+> 17 是唯一為移植加固的:`settledForThisView` 與 reqSeq 重驗讓它在本版不可達。
+> 但那是兩道不相關的保護剛好擋在前面,不是這條規則本身被遵守 —— 搬到沒有它們
+> 的 store 上就直接可達。
+>
+> 四者的失效形狀都是「自動翻譯靜默停止」,和缺陷 1、2 的使用者回報**無法區分**。
 > 移植時若略過它們,新版跑起來會像是沒修好,而不是像多了一個 bug。
 
 ### 3.1 已知而未修(設計取捨,留給產品決策)
