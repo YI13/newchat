@@ -269,9 +269,9 @@ function takeNext(): QueueItem | null {
   if (autoItems.length === 0) return null;
 
   const byId = new Map(autoItems.map((item) => [item.messageId, item]));
-  // Unsigned distance from the centre of what the user is looking at, measured
-  // live at pick time. The old signed comparator ordered "topmost first",
-  // which is arrival order, not attention order.
+  // Already switched to this in Phase A (A2b); here it moves from a sort of
+  // the whole batch to a pick of one, so a job that left the viewport while
+  // waiting is dropped at pick time rather than translated.
   const ordered = visibilityObserver.byDistanceFromCentre([...byId.keys()]);
 
   for (const id of ordered) {

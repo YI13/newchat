@@ -7,7 +7,8 @@
 
 ```
 Phase A ─────────────────────────────────────────────┐
- A1 ──► A2 ──┬──► A3                                 │
+ A1 ──► A2 ──┬──► A2b                                │
+             ├──► A3                                 │
              ├──► A4 ──► A5                          │
              └──► A6 ──► A7 ──► A8 ★ 量測點           │
                                                      ▼
@@ -44,7 +45,13 @@ Phase D ◄───────────────────────
 ### A2 — 加上相容包裝層
 貼上 §A.2。保留模組單例 export `visibilityObserver`。
 **驗收:** `autoPolicy.ts` 與 `store.ts` 對 `visibilityObserver` 的 import 一行
-未改仍能編譯,除了 `reset` 的呼叫點報錯(這是預期的,A3/A4 處理)。
+未改仍能編譯,除了 `reset` 與 `distanceToCenter` 的呼叫點報錯(這是預期的,
+A2b/A4 處理)。包裝層**不得**有 `distanceToCenter` —— 見 §A.2 的說明。
+
+### A2b — pump 的排序改用 `byDistanceFromCentre`
+`01-phase-A-observer.md` §A.3,三行。
+**驗收:** 全域搜尋 `distanceToCenter` 為零結果。排序只讀一次 layout,不在
+comparator 裡讀。
 
 ### A3 — 刪掉 `startAutoPolicy()` 裡的 `visibilityObserver.reset()`
 整行刪除,不要換成別的。
