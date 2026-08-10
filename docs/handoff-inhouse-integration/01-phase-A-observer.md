@@ -1,7 +1,8 @@
 # Phase A — 換掉 `visibilityTracker.ts`
 
 **耦合最低、回報最高。** 一次修掉 `00-assessment.md` 的 B1/B2/B3 三個決定性
-缺陷。動兩個檔案,不碰 store、不碰 policy、不碰快取。
+缺陷。動三個檔案:`visibilityTracker.ts` 整檔替換、`autoPolicy.ts` 兩處
+`reset` 呼叫、`store.ts` 三行排序。不碰快取、不碰佇列語意、不碰 policy 邏輯。
 
 做完之後**先上線量測再往下走**。這是整個計畫裡唯一能單獨回答「根因是不是在
 觀察器」的一步。
@@ -341,32 +342,48 @@ export const visibilityObserver = {
   setRoot: (el: Element | null) => impl.setRoot(el),
   setViewportCentre: (v: number | null) => impl.setViewportCentre(v),
   byDistanceFromCentre: (ids: Iterable<string>) => impl.byDistanceFromCentre(ids),
-
-  /**
-   * @deprecated Signed distance, kept only so pump() still compiles during
-   * Phase A. Its ordering is "topmost first", not "what the user is looking
-   * at first". Phase C switches pump to byDistanceFromCentre and this goes.
-   */
-  distanceToCenter(id: string): number {
-    const ranked = impl.byDistanceFromCentre([id]);
-    if (ranked.length === 0) return Infinity;
-    const el = (impl as unknown as { registeredIds(): string[] }).registeredIds();
-    return el.includes(id) ? 0 : Infinity;
-  },
 };
 ```
 
-> `distanceToCenter` 的暫時實作**故意是退化的**(只分「有註冊」與「沒註冊」)。
-> Phase A 不該同時改動排序行為 —— 那是 Phase C 的 T14。如果你發現 Phase A
-> 之後排序變差,那是預期的,C 會修回來且更好。
->
-> 如果你想在 Phase A 就保住排序品質,可以把 pump 的 sort 改成一行:
-> `const ordered = visibilityObserver.byDistanceFromCentre(autoJobs.map(j => j.messageId))`
-> 然後照 ordered 重排 `autoJobs`。這是安全的,但要一起改 pump,不再是「只動兩檔」。
+> **沒有 `distanceToCenter`,這是刻意的。** 舊的 per-id 述詞被 pump 放在
+> comparator 裡呼叫,所以它每次比較都讀一次 layout —— 50 個工作約 300 次比較
+> 就是 600 次強制 layout。`byDistanceFromCentre` 一次算完整批,理由寫在它自己
+> 的註解裡。保留一個相容 shim 會把那個成本原封不動留著,而且 Phase C 還要再
+> 回來刪一次。pump 的改法見 A.3,三行。
 
 ---
 
-## A.3 呼叫點改動
+## A.3 pump 的排序(三行)
+
+`store.ts` 的 pump 目前:
+
+```ts
+autoJobs.sort((a, b) => distanceToCenter(a.messageId) - distanceToCenter(b.messageId));
+```
+
+改成:
+
+```ts
+// Ranked in one pass: the comparator runs O(n log n) times and reading layout
+// inside it turns one flush into hundreds. Unsigned distance from the centre
+// of what the user is looking at — the old signed version ordered "topmost
+// first", which is arrival order, not attention order.
+const order = visibilityObserver.byDistanceFromCentre(autoJobs.map((j) => j.messageId));
+const rank = new Map(order.map((id, i) => [id, i]));
+autoJobs.sort((a, b) => rank.get(a.messageId)! - rank.get(b.messageId)!);
+```
+
+這讓 Phase A 從兩個檔案變成三個,值得:它比現況**更便宜**(一次 layout 而不是
+每次比較一次),而且它就是 Phase C 的 `takeNext` 最終會寫的東西 —— 現在做等於
+先付了 C 的一部分,不是額外的工。
+
+**這不影響 A8 的可歸因性。** A8 量的三個數字(佇列峰值、`result=idle` 比例、
+捲回的訊息會不會被翻譯)沒有一個和排序有關 —— 排序決定的是**先翻哪一則**,
+不是翻幾則或翻不翻。
+
+---
+
+## A.4 呼叫點改動
 
 `reset` 不再存在,編譯器會在每個舊呼叫點報錯。逐一決定它要的是哪一個:
 
@@ -395,10 +412,11 @@ document.addEventListener('visibilitychange', () => {
 
 ---
 
-## A.4 Phase A 不做的事
+## A.5 Phase A 不做的事
 
-- **不改 pump。** G5 仍讀 `visibilityObserver.visibleIds`,語意不變(而且現在
-  是對的 —— 這個集合終於只由 IO callback 寫入)。
+- **pump 只改 A.3 那三行排序。** G5 仍讀 `visibilityObserver.visibleIds`,
+  語意不變(而且現在是對的 —— 這個集合終於只由 IO callback 寫入);並行閘門、
+  斷路器、佇列上限一律不動,那些是 Phase C。
 - **不改 `autoPolicy.ts` 的邏輯**,只改上表那兩行 reset。
 - **不動 F7/F8 的 guard。** 它們補的是另一層的問題,Phase C 才會讓它們變成
   多餘。現在拿掉會同時改變兩個變因。
@@ -406,7 +424,7 @@ document.addEventListener('visibilitychange', () => {
 
 ---
 
-## A.5 驗收
+## A.6 驗收
 
 見 `06-verification.md` §A。摘要:
 
