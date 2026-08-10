@@ -9,7 +9,8 @@
 Phase A ─────────────────────────────────────────────┐
  A1 ──► A2 ──┬──► A2b                                │
              ├──► A3                                 │
-             ├──► A4 ──► A5                          │
+             ├──► A4 ──┬──► A4b                      │
+             │         └──► A5                       │
              └──► A6 ──► A7 ──► A8 ★ 量測點           │
                                                      ▼
 Phase B                                        (A8 之後才開始)
@@ -57,9 +58,21 @@ comparator 裡讀。
 整行刪除,不要換成別的。
 **驗收:** 打開自動翻譯開關時,當下畫面上的訊息會開始翻譯,不需要先捲一下。
 
-### A4 — 其餘 `reset()` 呼叫點改為 `destroy()`
-`resetAutoPolicy()` 與換房間處。逐一確認要的是「清空註冊表」而不是「重建」。
-**驗收:** 換房間後,舊房間的訊息 id 不再出現在 `registeredIds()`。
+### A4 — 處理其餘 `reset()` 呼叫點
+**只有 `resetAutoPolicy()` 改成 `destroy()`。** 換房間處**整行刪掉** —— 註冊表
+歸訊息元件所有,父層從 `useEffect` 清它會 race 掉剛掛載的列(ref 在 layout
+phase 附加,父層 effect 在 passive phase 才跑)。理由見
+`01-phase-A-observer.md` §A.4 的第一則 ⚠️。
+**驗收:** 換房間後,舊房間的訊息 id 不再出現在 `registeredIds()` —— 這要由
+**元件卸載時自己 `unobserve`** 達成,不是由 `destroy()`。全域搜尋
+`visibilityObserver.destroy()` 應該只剩 `resetAutoPolicy()` 一處。
+
+### A4b — 元件層:房間與開關拆成兩個 effect
+`01-phase-A-observer.md` §A.4 的「元件層」小節。一個 effect 同時吃
+`[roomId, autoTranslate]` 的話,關開關會跑到 cleanup,而 cleanup 裡的
+`resetAutoPolicy()` 會清空註冊表。
+**驗收:** 關閉自動翻譯再打開,當下畫面上的訊息開始翻譯(即 A-2 冒煙項目)。
+`resetAutoPolicy()` 不出現在這兩個 effect 的 cleanup 裡。
 
 ### A5 — 新增 `visibilitychange` → `rebuild()`
 接在既有的 hidden 監聽同一個 handler,不要新增第二個 listener。
