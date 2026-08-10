@@ -434,9 +434,10 @@ const policy = createAutoPolicy({
 ```
 
 現況 `onCandidate(messageId, roomId)` 帶 roomId 並比對 `activeRoomId !== roomId`。
-新版 roomId 只從 context 取,那道比對不再需要 —— 換房間時
-`visibilityObserver.destroy()` 已經把舊房間的訊息移出註冊表(Phase A 的
-A.3)。**前提是 A.3 那張表確實照做了**;沒做的話這裡會翻到舊房間的訊息。
+新版 roomId 只從 context 取,那道比對不再需要 —— 換房間時舊房間的訊息元件會
+卸載並各自 `unobserve`,註冊表自然只剩新房間的列。**不要**在這裡呼叫
+`destroy()` 幫忙清,理由見 `01-phase-A-observer.md` §A.4 的 ⚠️(會 race 掉
+剛掛載的新訊息)。
 
 ---
 
@@ -480,8 +481,11 @@ export function stopAutoPolicy(): void {
 
 export function setAutoPolicyRoom(roomId: string | null): void {
   activeRoomId = roomId;
-  visibilityObserver.destroy();   // the previous room's elements must go
   messageIndex.invalidate(roomId);
+  // No destroy(). The registry belongs to the mounted messages: refs attach in
+  // the layout phase, this effect runs in the passive phase, so clearing here
+  // wipes the rows that just registered themselves for the new room. They
+  // unobserve themselves on unmount; nothing here has to help.
 }
 
 export function setAutoPolicyHidden(hidden: boolean): void {
