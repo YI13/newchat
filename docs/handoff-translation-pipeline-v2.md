@@ -110,6 +110,31 @@ decisionLog —— 決策只有交織在同一條時間軸上才可解讀。
 | 11 | 診斷面板 slot 計數在切換語言時對不上 | in-flight 以 messageId 為 key;supersede 期間同一訊息有兩個真實在途請求(transport 無法取消飛行中),per-message map 數不到 | store per-job `running` 集合,與計數器同步增減;`inspect()` 從它報 |
 | 12 | config 宣告的行為實際不存在 | `scrollIdleMs` / `timeoutMs` / `maxQueueLength` 曾宣告而無人讀取 | 「every declared knob is wired」白名單測試;死旋鈕刪除 |
 | 13 | 佇列滿看起來跟後端慢一模一樣 | 單一 `loading` 狀態 | `queued`(未送出,可能永不送出)/`loading`(已上線)分離;UI 分開顯示 |
+| 14 | 後端恢復之後,自動翻譯整個 session 再也不動 | 斷路器的 probe token 在**述詞裡**被佔用(`circuitBlocks` 同時測試與佔用)。測試與送出之間任何一條 return —— rate-limited skip、store 丟例外 —— 都留下一個永不歸還的 token,之後每個候選都讀成「已有 probe 在飛」 | `circuitBlocks` 改為**純述詞**;新增 `claimProbe()`,在最後一道 gate 通過後、呼叫 store 之前才佔用;`onCandidate` 的 catch 補歸還 |
+| 15 | 後端翻譯成功,訊息卻顯示失敗,五則之後自動翻譯關閉 | `cache.content.set` 的例外落在 runJob 的 try 內,被歸類為翻譯失敗;磁碟滿/私密模式/DB 損毀因此餵進斷路器 | `outcome = { ok: true }` 移到寫入**之前**;寫入單獨 try/catch,失敗只記 `violation:cache-write-failed`。與缺陷 6 同一條原則:本地故障≠後端故障 |
+| 16 | 斷路器一打開,決策 log 就被洗光,查不到它為什麼跳 | 缺陷 8 的靜默 gate 只涵蓋 `autoTranslate`/`active`;`circuit-open`/`rate-limited` 同樣是**全域**狀態卻走 per-message 路徑,12 則可視訊息 × 1s sweep 在 167 秒內填滿整個 buffer,而冷卻是指數成長的 | 兩者併入 sweep 迴圈前的同一道靜默 gate。**前提是缺陷 14 已修** —— 述詞不純的話,sweep 每秒會偷走 probe token |
+| 17 | (潛在)`sent` promise 永不 settle,呼叫端連同 probe token 一起卡死 | `ensureForView` 對每個到達 `translateMessage` 的呼叫都回報 `outcome: 'queued'` 並交出 `sent`,但 dedupe 早退路徑不呼叫 `onSent` | dedupe 路徑補 `onSent?.(false)`,與下方 refuse 路徑對稱。在本版因 `settledForThisView` + reqSeq 重驗而不可達;**移植到沒有這兩道保護的 store 時直接可達** |
+
+> **14、15、16 在本版就會發生,不需要任何移植情境。** 快取沒有任何 try/catch
+> (`idbTranslationCache/index.js` 全檔 0 個),`content.set` 直接 `put`,Dexie
+> 在配額耗盡、DB 被封鎖、Safari 私密模式下會 reject —— 這同時讓 15 成立,也讓
+> 14 的 throw 路徑成立(`ensureForView` 的兩次 cache 讀取一樣沒有保護,例外
+> 會帶著已佔用的 probe token 一路穿到 `onCandidate` 的 catch)。
+>
+> 兩者串起來是一條無法自我恢復的鏈:後端回覆正確 → IDB 寫入 reject → 譯文被
+> 丟棄、顯示失敗 → 計入斷路器 → 五則後斷路器打開 → 下一個 probe 在同一個地方
+> throw → token 洩漏 → **整個 session 自動翻譯關閉**,全程後端健康、無任何錯誤。
+>
+> 16 只需要一次後端故障:sweep 每秒 × 12 則可視訊息,2000 筆 buffer 在 167 秒
+> 內洗光,而冷卻是指數成長的 —— 故障期間正是最需要 log 的時候,而 log 在故障
+> 期間自我銷毀。
+>
+> 17 是唯一為移植加固的:`settledForThisView` 與 reqSeq 重驗讓它在本版不可達。
+> 但那是兩道不相關的保護剛好擋在前面,不是這條規則本身被遵守 —— 搬到沒有它們
+> 的 store 上就直接可達。
+>
+> 四者的失效形狀都是「自動翻譯靜默停止」,和缺陷 1、2 的使用者回報**無法區分**。
+> 移植時若略過它們,新版跑起來會像是沒修好,而不是像多了一個 bug。
 
 ### 3.1 已知而未修(設計取捨,留給產品決策)
 
@@ -472,16 +497,34 @@ export function createTranslationStore({
       if (getEntry(item.messageId).reqSeq !== item.reqSeq) return
 
       const identical = result.translatedText === item.text
-      await cache.content.set({
-        messageId: item.messageId,
-        roomId: item.roomId,
-        targetLang: item.targetLang,
-        srcVersion: item.srcVersion,
-        translatedText: result.translatedText,
-        originalText: item.text,
-      })
 
+      // Settled before the write, not after. The translation succeeded the
+      // moment the backend replied; persisting it is a local convenience. A
+      // full quota, a private-mode database, a corrupt store — each would
+      // otherwise throw here and be caught below as a failed translation:
+      // the text is discarded, the message shows an error, and the automatic
+      // circuit breaker counts a backend that never misbehaved. Five of those
+      // and automatic translation switches itself off. Same rule the policy
+      // layer applies to its own internal errors — a local fault says nothing
+      // about the backend.
       outcome = { ok: true }
+      try {
+        await cache.content.set({
+          messageId: item.messageId,
+          roomId: item.roomId,
+          targetLang: item.targetLang,
+          srcVersion: item.srcVersion,
+          translatedText: result.translatedText,
+          originalText: item.text,
+        })
+      } catch (err) {
+        // Kept in memory and rendered; it simply has to be fetched again next
+        // time this message comes into view.
+        log.emit(DECISION.Violation, item.messageId, {
+          reason: 'cache-write-failed',
+          error: err,
+        })
+      }
       if (getEntry(item.messageId).reqSeq !== item.reqSeq) return
       setEntry(item.messageId, {
         status: 'translated',
@@ -546,6 +589,13 @@ export function createTranslationStore({
       current.srcVersion === srcVersion
     if (alreadyRunning) {
       log.emit(DECISION.Deduped, messageId, { origin, status: current.status })
+      // Symmetrical with the refusal below, and for a harder reason:
+      // ensureForView reports 'queued' for every call that reaches this
+      // function, so the `sent` promise it hands back has to settle on every
+      // path out of it. A caller that awaits `sent` — the policy layer does,
+      // to decide whether to charge its rate budget — would otherwise wait
+      // forever, holding the probe token with it.
+      onSent?.(false)
       return Promise.resolve({ ok: true, deduped: true })
     }
 
@@ -1154,13 +1204,29 @@ export function createAutoPolicy({
   let circuitCooldownMs = cfg.failureCircuitCooldownMs
   let probing = false
 
+  /**
+   * Pure predicate — deliberately. An earlier version claimed the probe token
+   * here, in the same expression that tested for it. Every path that returned
+   * between the test and the request then kept a token nothing would ever give
+   * back: a rate-limited skip, or a throw from the store. `probing` stays true,
+   * every later candidate reads it as "a probe is already out", and automatic
+   * translation is off for the rest of the session with the backend healthy.
+   * The token is claimed at the point of use instead — see offerCandidate.
+   */
   function circuitBlocks() {
     if (consecutiveFailures < cfg.failureCircuitThreshold) return false
     if (now() < circuitOpenUntil) return true
     // Cooldown elapsed: let exactly one request through to test the water.
-    if (probing) return true
+    return probing
+  }
+
+  /** True when the breaker is open and this call is the one probe allowed
+   *  through. Separate from circuitBlocks so the predicate can be called for
+   *  its answer alone — the sweep does exactly that, every second. */
+  function claimProbe() {
+    if (consecutiveFailures < cfg.failureCircuitThreshold) return false
     probing = true
-    return false
+    return true
   }
 
   function rateLimited() {
@@ -1210,6 +1276,12 @@ export function createAutoPolicy({
     try {
       return await offerCandidate(messageId)
     } catch (err) {
+      // The throw may have happened after the probe token was claimed, in
+      // which case nothing downstream will settle and release it. This is the
+      // broken-IndexedDB case the silent-skip rule above was written for, and
+      // leaving the token held would turn a local fault into a permanently
+      // open circuit.
+      probing = false
       log.emit(DECISION.Skip, messageId, { reason: SKIP.InternalError, error: err })
       return { skipped: SKIP.InternalError }
     }
@@ -1238,6 +1310,10 @@ export function createAutoPolicy({
       })
     }
     if (rateLimited()) return skip(SKIP.RateLimited, { inWindow: recentRequests.length })
+
+    // Last gate passed: this call is going to the store, so it is now safe to
+    // claim the probe token. Everything that can decline is behind us.
+    claimProbe()
 
     const result = await store.ensureForView(messageId, {
       roomId: ctx.roomId,
@@ -1316,6 +1392,16 @@ export function createAutoPolicy({
     // the history a diagnosis needs.
     const ctx = getContext()
     if (!ctx.autoTranslate || !ctx.active) return
+
+    // The circuit and the rate limit are global state, not per-message, so
+    // they belong in the same pre-loop gate for the same reason. Left to the
+    // per-message path they log one identical skip per visible message per
+    // tick: twelve messages on screen fills the whole buffer in under three
+    // minutes, and the cooldown doubles, so the failures that opened the
+    // circuit are guaranteed to be evicted before anyone reads the log.
+    // Safe only because circuitBlocks is a pure predicate — calling it here
+    // once a second must not claim the probe token.
+    if (circuitBlocks() || rateLimited()) return
 
     for (const id of ids) {
       if (store.getEntry(id).status !== 'idle') continue
@@ -2113,9 +2199,9 @@ export function useTranslationDiagnostics({ intervalMs = 500, tail = 40 } = {}) 
 
 | 檔案 | 釘住什麼 |
 |---|---|
-| `store.test.js`(51 tests) | 生命週期、queued/loading、dedup、generation、timeout(含 reject-before-abort)、佇列上限、sent 回報、**invalidate purge(缺陷 #9)**、**revert TOCTOU(缺陷 #10)** |
+| `store.test.js`(55 tests) | 生命週期、queued/loading、dedup、generation、timeout(含 reject-before-abort)、佇列上限、sent 回報、**invalidate purge(缺陷 #9)**、**revert TOCTOU(缺陷 #10)**、**快取寫入失敗不算翻譯失敗(缺陷 #15)**、**每條路徑都結算 `sent`(缺陷 #17)** |
 | `visibilityObserver.test.js`(20) | dwell 語意、身分 WeakMap、**負 margin 夾制(含負值輸入)**、**活位置排序(缺陷 #3)** |
-| `autoPolicy.test.js`(38+) | skip 規則、RPM(**只計真送出**)、斷路器(bad_request 豁免、指數退避、**並發單一 probe**)、sweep(idle-only、fire-and-forget、靜默 gate)、**never-throws**、**死旋鈕白名單** |
+| `autoPolicy.test.js`(43+) | skip 規則、RPM(**只計真送出**)、斷路器(bad_request 豁免、指數退避、**並發單一 probe**)、sweep(idle-only、fire-and-forget、靜默 gate)、**never-throws**、**死旋鈕白名單**、**probe token 歸還(缺陷 #14)**、**sweep 全域 gate 靜默(缺陷 #16)** |
 | `TranslationContext.test.jsx`(2) | **合約 C**:背景載入→前景,無 re-render 也要能翻;真隱藏仍拒絕 |
 | `decisionLog.test.js`(15)/`invariants.test.js`(21) | ring buffer 語意、內文永不輸出;每條不變量的正反例 |
 | `autoTranslate.integration.test.js`(15) | 三模組真組裝:dwell 端到端、子閘門、掉線斷路、stalled 回收、佇列上限 |
@@ -2138,7 +2224,7 @@ export function useTranslationDiagnostics({ intervalMs = 500, tail = 40 } = {}) 
 revert 的絕不 translated、計數歸零、log 中 send 與 settle 一一配對。
 固定種子=失敗可重放。本文的缺陷 #9/#10/#11 全部由它首次抓到。
 
-### 8.2 突變測試(9 個突變,對你移植後的程式碼跑)
+### 8.2 突變測試(14 個突變,對你移植後的程式碼跑)
 
 把以下 bug 逐一植入,**你的套件必須每一個都變紅**;活下來的突變=假覆蓋:
 
@@ -2152,7 +2238,17 @@ revert 的絕不 translated、計數歸零、log 中 send 與 settle 一一配�
 | policy | circuitBlocks 不查 `probing` | 恢復瞬間全體 probe 踩踏 |
 | policy | 不等 `result.sent` 直接計費 | 缺陷 #1 |
 | policy | sweep 不查 `status !== 'idle'` | 無限重試 rejected body |
-| policy | sweep 不過靜默 gate | 缺陷 #8 |
+| policy | sweep 不過 auto/active 靜默 gate | 缺陷 #8 |
+| policy | probe token 在述詞裡佔用 | 缺陷 #14 |
+| policy | `onCandidate` catch 不歸還 token | 缺陷 #14(丟例外那條) |
+| policy | sweep 不過 circuit/rate 靜默 gate | 缺陷 #16 |
+| store | 快取寫入失敗往外丟 | 缺陷 #15 |
+| store | dedupe 路徑不呼叫 `onSent` | 缺陷 #17 |
+
+前九個釘住「這個判斷有沒有被做」,後五個釘住「做完之後有沒有收乾淨」。
+缺陷 14 的教訓正是這個分野:原本的 M6 驗證 `probing` **有被檢查**,但沒有
+任何突變驗證它**在所有路徑上被歸還** —— 缺陷存在時 9/9 照樣全殺、完成清單
+照樣全綠。新增一個判斷時,一併問「它持有的東西誰負責放掉」。
 
 實作:對原始檔做字串替換 → 跑套件 → 斷言紅 → 還原(用備份檔還原,不要用
 git checkout,以免吃掉未提交變更)。
@@ -2178,7 +2274,7 @@ git checkout,以免吃掉未提交變更)。
 - [ ] §5 六檔逐字落地,只改 §6 適配點
 - [ ] §7 測試全數移植,套件全綠
 - [ ] 混沌測試三種子全綠(含三連跑穩定)
-- [ ] 突變測試 9/9 全殺
+- [ ] 突變測試 14/14 全殺
 - [ ] 真實瀏覽器冒煙:前景分頁捲動 → Queued…/Translating… 分別可見、
       `__translate.check()` 為空、`timeline(id)` 可解釋任一則的決策路徑
 - [ ] 背景分頁不發請求;背景載入→前景後自動恢復(合約 C)
@@ -2437,6 +2533,7 @@ export const translationCache = createTranslationCache()
 import 'fake-indexeddb/auto'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { createTranslationCache } from '@/lib/idbTranslationCache'
+import { createDecisionLog } from './decisionLog'
 import { createTranslationStore } from './store'
 
 let disposables = []
@@ -2480,6 +2577,7 @@ function makeStore(overrides = {}) {
     translate,
     cache,
     config: { maxConcurrent: 4, ...overrides.config },
+    log: overrides.log,
   })
   return { store, translate, cache }
 }
@@ -3355,6 +3453,81 @@ describe('revert racing an in-progress view decision', () => {
     expect(result.outcome).not.toBe('queued')
     expect(translate).not.toHaveBeenCalled()
     expect(store.getEntry('m1').status).toBe('idle')
+  })
+})
+
+describe('a local fault is not a backend failure', () => {
+  test('a translation whose cache write fails is still translated', async () => {
+    // Quota exhausted, private-mode database, corrupt store. The backend
+    // replied correctly and the text is in hand; the only loss is that it has
+    // to be fetched again next time. Reporting this as a failed translation
+    // discards a good result, shows the user an error, and — because the
+    // policy layer counts settled failures — walks the automatic circuit
+    // breaker toward switching the feature off over a fault the backend had
+    // no part in.
+    const { store, translate, cache } = makeStore()
+    vi.spyOn(cache.content, 'set').mockRejectedValue(new Error('QuotaExceededError'))
+
+    const done = store.translate('m1', job())
+    await flush()
+    translate.calls[0].resolve({ translatedText: 'こんにちは' })
+
+    expect(await done).toMatchObject({ ok: true })
+    expect(store.getEntry('m1')).toMatchObject({
+      status: 'translated',
+      translatedText: 'こんにちは',
+    })
+  })
+
+  test('the failed write is recorded, so a missing cache is still diagnosable', async () => {
+    const log = createDecisionLog({ printing: false })
+    const { store, translate, cache } = makeStore({ log })
+    vi.spyOn(cache.content, 'set').mockRejectedValue(new Error('QuotaExceededError'))
+
+    const done = store.translate('m1', job())
+    await flush()
+    translate.calls[0].resolve({ translatedText: 'こんにちは' })
+    await done
+
+    const violation = log.records().find((r) => r.reason === 'cache-write-failed')
+    expect(violation).toBeDefined()
+    expect(violation.messageId).toBe('m1')
+  })
+})
+
+describe('every path out of translateMessage settles `sent`', () => {
+  // ensureForView reports `outcome: 'queued'` for every call that reaches
+  // translateMessage, and hands back the `sent` promise unconditionally. A
+  // caller that awaits it — the policy layer does, to decide whether to
+  // charge its rate budget — hangs forever on any path that returns without
+  // resolving it, and takes the circuit breaker's probe token down with it.
+  test('the dedupe path resolves it false', async () => {
+    const { store } = makeStore()
+    store.translate('m1', job())
+    await flush()
+
+    let settled = null
+    const second = store.translate('m1', { ...job(), onSent: (v) => (settled = v) })
+
+    await expect(second).resolves.toMatchObject({ deduped: true })
+    expect(settled).toBe(false)
+  })
+
+  test('the refusal path resolves it false', async () => {
+    // The queue ceiling applies to automatic jobs only.
+    const { store } = makeStore({ config: { maxQueueLength: 1, maxConcurrent: 1 } })
+    store.translate('a', { ...job(), origin: 'auto' })
+    await flush()
+    store.translate('b', { ...job(), origin: 'auto' })
+    await flush()
+
+    let settled = null
+    await store.translate('c', {
+      ...job(),
+      origin: 'auto',
+      onSent: (v) => (settled = v),
+    })
+    expect(settled).toBe(false)
   })
 })
 ```
@@ -4354,6 +4527,150 @@ describe('probe concurrency', () => {
     expect(second.skipped).toBe(SKIP.CircuitOpen)
     expect(third.skipped).toBe(SKIP.CircuitOpen)
     void probe
+  })
+})
+
+describe('probe token release', () => {
+  // The circuit breaker lets exactly one request through once its cooldown
+  // elapses. That permission is a token: claimed when the probe is allowed
+  // out, returned when it settles. Every one of these tests fails if a path
+  // claims the token and then declines to send, because the token is never
+  // returned and the breaker stays open with the backend healthy.
+  function opened(config = {}) {
+    const h = makePolicy({
+      config: { failureCircuitThreshold: 2, failureCircuitCooldownMs: 30_000, ...config },
+    })
+    h.fail = () =>
+      h.ensureForView.mockImplementation(async () => ({
+        outcome: 'queued',
+        done: Promise.reject(Object.assign(new Error('boom'), { code: 'internal' })),
+        sent: Promise.resolve(true),
+      }))
+    h.succeed = () =>
+      h.ensureForView.mockImplementation(async () => ({
+        outcome: 'queued',
+        done: Promise.resolve(),
+        sent: Promise.resolve(true),
+      }))
+    return h
+  }
+
+  test('a rate limit that declines the probe does not consume it', async () => {
+    // maxRequestsPerMinute is reached by the same two failures that open the
+    // circuit, so the first post-cooldown candidate is refused by the rate
+    // limit rather than by the breaker.
+    const h = opened({ maxRequestsPerMinute: 2 })
+    h.fail()
+    await h.policy.onCandidate('m1')
+    await h.policy.onCandidate('m1')
+    expect(h.policy.stats().circuitOpen).toBe(true)
+
+    h.advance(30_001)
+    expect((await h.policy.onCandidate('m1')).skipped).toBe(SKIP.RateLimited)
+
+    // Rate window has now passed; the breaker's cooldown passed long ago.
+    // Nothing is left to block a probe — unless the refusal above quietly
+    // took the token with it.
+    h.advance(30_001)
+    h.succeed()
+    h.ensureForView.mockClear()
+    await h.policy.onCandidate('m1')
+    expect(h.ensureForView).toHaveBeenCalledTimes(1)
+    expect(h.policy.stats().circuitOpen).toBe(false)
+  })
+
+  test('a probe that throws before it is sent does not consume it', async () => {
+    // The broken-IndexedDB case: a local fault, which must neither feed the
+    // breaker nor strand its probe token.
+    const h = opened()
+    h.fail()
+    await h.policy.onCandidate('m1')
+    await h.policy.onCandidate('m1')
+
+    h.advance(30_001)
+    h.ensureForView.mockImplementation(async () => {
+      throw new Error('IndexedDB is closing')
+    })
+    expect((await h.policy.onCandidate('m1')).skipped).toBe(SKIP.InternalError)
+
+    h.succeed()
+    h.ensureForView.mockClear()
+    await h.policy.onCandidate('m1')
+    expect(h.ensureForView).toHaveBeenCalledTimes(1)
+    expect(h.policy.stats().circuitOpen).toBe(false)
+  })
+
+  test('the sweep reads the breaker without consuming the probe', async () => {
+    // recheckVisible consults the breaker to stay silent while it is open.
+    // That read must be a question, not a claim: here the cooldown has
+    // elapsed and nothing on screen is eligible for re-offering, so the sweep
+    // does no work at all — and must still leave the probe for the next real
+    // candidate. A sweep that claimed the token would take one per second and
+    // send none of them, so the circuit could never close.
+    const h = opened()
+    h.fail()
+    await h.policy.onCandidate('m1')
+    await h.policy.onCandidate('m1')
+
+    h.advance(30_001)
+    h.visible.add('m1')
+    // Not idle: the per-message loop skips it, leaving only the gates.
+    h.entries.set('m1', { status: 'translated', reqSeq: 0 })
+    for (let tick = 0; tick < 10; tick += 1) await h.policy.recheckVisible()
+
+    h.entries.delete('m1')
+    h.succeed()
+    h.ensureForView.mockClear()
+    await h.policy.onCandidate('m1')
+    expect(h.ensureForView).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('sweep log volume', () => {
+  test('stays silent while the circuit is open', async () => {
+    // The sweep fires once a second for the life of the page. A per-message
+    // skip while the breaker is open churns the decision log's whole buffer
+    // in minutes, evicting the failures that opened it — the one piece of
+    // history a diagnosis needs.
+    const log = createDecisionLog({ printing: false })
+    const h = makePolicy({
+      config: { failureCircuitThreshold: 2, failureCircuitCooldownMs: 30_000 },
+      messages: [message({ id: 'a' }), message({ id: 'b' }), message({ id: 'c' })],
+      log,
+    })
+    h.ensureForView.mockImplementation(async () => ({
+      outcome: 'queued',
+      done: Promise.reject(Object.assign(new Error('boom'), { code: 'internal' })),
+      sent: Promise.resolve(true),
+    }))
+    await h.policy.onCandidate('a')
+    await h.policy.onCandidate('a')
+    expect(h.policy.stats().circuitOpen).toBe(true)
+
+    h.visible.add('a')
+    h.visible.add('b')
+    h.visible.add('c')
+    const before = log.records().length
+    for (let tick = 0; tick < 10; tick += 1) await h.policy.recheckVisible()
+
+    expect(log.records().length).toBe(before)
+  })
+
+  test('stays silent while the rate limit is saturated', async () => {
+    const log = createDecisionLog({ printing: false })
+    const h = makePolicy({
+      config: { maxRequestsPerMinute: 1 },
+      messages: [message({ id: 'a' }), message({ id: 'b' })],
+      log,
+    })
+    await h.policy.onCandidate('a')
+
+    h.visible.add('a')
+    h.visible.add('b')
+    const before = log.records().length
+    for (let tick = 0; tick < 10; tick += 1) await h.policy.recheckVisible()
+
+    expect(log.records().length).toBe(before)
   })
 })
 ```
@@ -6248,11 +6565,12 @@ describeAnalysis('scrolling, then stopping to read', () => {
 檔案:`mutation-test.py`
 
 ```python
-import subprocess, shutil, sys, os
+import subprocess, shutil, sys
 
 ROOT = 'src/context/TranslationContext'
 VO = f'{ROOT}/visibilityObserver.js'
 AP = f'{ROOT}/autoPolicy.js'
+ST = f'{ROOT}/store.js'
 
 # (file, name, what-bug-this-reintroduces, old, new)
 MUTANTS = [
@@ -6268,16 +6586,31 @@ MUTANTS = [
     (AP, 'M5 bad-request-counts', 'one malformed message trips the breaker',
      "if (err?.code === 'bad_request') return", 'if (false) return'),
     (AP, 'M6 probe-stampede', 'every candidate probes an open circuit',
-     'if (probing) return true', 'if (false) return true'),
+     '    return probing\n  }', '    return false\n  }'),
     (AP, 'M7 charge-on-enqueue', 'ghost requests eat the rate budget',
      'if (!(await result.sent)) {', 'if (false) {'),
     (AP, 'M8 sweep-retries-failed', 'infinite retry of rejected bodies',
      "if (store.getEntry(id).status !== 'idle') continue", 'if (false) continue'),
     (AP, 'M9 sweep-ignores-gates', 'per-tick log churn while auto is off',
      'if (!ctx.autoTranslate || !ctx.active) return', 'if (false) return'),
+    (AP, 'M10 probe-claimed-in-predicate', 'a declined probe holds its token forever',
+     '    return probing\n  }',
+     '    if (probing) return true\n    probing = true\n    return false\n  }'),
+    (AP, 'M11 probe-held-after-throw', 'a broken cache latches the circuit open',
+     '      probing = false\n      log.emit(DECISION.Skip, messageId,',
+     '      log.emit(DECISION.Skip, messageId,'),
+    (AP, 'M12 sweep-ignores-breaker', 'open circuit churns the decision log',
+     'if (circuitBlocks() || rateLimited()) return', 'if (false) return'),
+    (ST, 'M13 cache-write-fails-job', 'a full disk reads as a backend outage',
+     "        log.emit(DECISION.Violation, item.messageId, {\n          reason: 'cache-write-failed',",
+     "        throw err\n        log.emit(DECISION.Violation, item.messageId, {\n          reason: 'cache-write-failed',"),
+    (ST, 'M14 dedupe-strands-sent', 'a deduped job hangs its caller forever',
+     "      onSent?.(false)\n      return Promise.resolve({ ok: true, deduped: true })",
+     "      return Promise.resolve({ ok: true, deduped: true })"),
 ]
 
-FAST = [f'{ROOT}/visibilityObserver.test.js', f'{ROOT}/autoPolicy.test.js']
+FAST = [f'{ROOT}/visibilityObserver.test.js', f'{ROOT}/autoPolicy.test.js',
+        f'{ROOT}/store.test.js']
 SLOW = [f'{ROOT}/autoTranslate.integration.test.js', f'{ROOT}/stress.integration.test.js']
 
 def run(files):

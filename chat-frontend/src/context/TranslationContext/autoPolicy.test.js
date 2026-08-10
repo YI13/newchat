@@ -600,3 +600,147 @@ describe('probe concurrency', () => {
     void probe
   })
 })
+
+describe('probe token release', () => {
+  // The circuit breaker lets exactly one request through once its cooldown
+  // elapses. That permission is a token: claimed when the probe is allowed
+  // out, returned when it settles. Every one of these tests fails if a path
+  // claims the token and then declines to send, because the token is never
+  // returned and the breaker stays open with the backend healthy.
+  function opened(config = {}) {
+    const h = makePolicy({
+      config: { failureCircuitThreshold: 2, failureCircuitCooldownMs: 30_000, ...config },
+    })
+    h.fail = () =>
+      h.ensureForView.mockImplementation(async () => ({
+        outcome: 'queued',
+        done: Promise.reject(Object.assign(new Error('boom'), { code: 'internal' })),
+        sent: Promise.resolve(true),
+      }))
+    h.succeed = () =>
+      h.ensureForView.mockImplementation(async () => ({
+        outcome: 'queued',
+        done: Promise.resolve(),
+        sent: Promise.resolve(true),
+      }))
+    return h
+  }
+
+  test('a rate limit that declines the probe does not consume it', async () => {
+    // maxRequestsPerMinute is reached by the same two failures that open the
+    // circuit, so the first post-cooldown candidate is refused by the rate
+    // limit rather than by the breaker.
+    const h = opened({ maxRequestsPerMinute: 2 })
+    h.fail()
+    await h.policy.onCandidate('m1')
+    await h.policy.onCandidate('m1')
+    expect(h.policy.stats().circuitOpen).toBe(true)
+
+    h.advance(30_001)
+    expect((await h.policy.onCandidate('m1')).skipped).toBe(SKIP.RateLimited)
+
+    // Rate window has now passed; the breaker's cooldown passed long ago.
+    // Nothing is left to block a probe — unless the refusal above quietly
+    // took the token with it.
+    h.advance(30_001)
+    h.succeed()
+    h.ensureForView.mockClear()
+    await h.policy.onCandidate('m1')
+    expect(h.ensureForView).toHaveBeenCalledTimes(1)
+    expect(h.policy.stats().circuitOpen).toBe(false)
+  })
+
+  test('a probe that throws before it is sent does not consume it', async () => {
+    // The broken-IndexedDB case: a local fault, which must neither feed the
+    // breaker nor strand its probe token.
+    const h = opened()
+    h.fail()
+    await h.policy.onCandidate('m1')
+    await h.policy.onCandidate('m1')
+
+    h.advance(30_001)
+    h.ensureForView.mockImplementation(async () => {
+      throw new Error('IndexedDB is closing')
+    })
+    expect((await h.policy.onCandidate('m1')).skipped).toBe(SKIP.InternalError)
+
+    h.succeed()
+    h.ensureForView.mockClear()
+    await h.policy.onCandidate('m1')
+    expect(h.ensureForView).toHaveBeenCalledTimes(1)
+    expect(h.policy.stats().circuitOpen).toBe(false)
+  })
+
+  test('the sweep reads the breaker without consuming the probe', async () => {
+    // recheckVisible consults the breaker to stay silent while it is open.
+    // That read must be a question, not a claim: here the cooldown has
+    // elapsed and nothing on screen is eligible for re-offering, so the sweep
+    // does no work at all — and must still leave the probe for the next real
+    // candidate. A sweep that claimed the token would take one per second and
+    // send none of them, so the circuit could never close.
+    const h = opened()
+    h.fail()
+    await h.policy.onCandidate('m1')
+    await h.policy.onCandidate('m1')
+
+    h.advance(30_001)
+    h.visible.add('m1')
+    // Not idle: the per-message loop skips it, leaving only the gates.
+    h.entries.set('m1', { status: 'translated', reqSeq: 0 })
+    for (let tick = 0; tick < 10; tick += 1) await h.policy.recheckVisible()
+
+    h.entries.delete('m1')
+    h.succeed()
+    h.ensureForView.mockClear()
+    await h.policy.onCandidate('m1')
+    expect(h.ensureForView).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('sweep log volume', () => {
+  test('stays silent while the circuit is open', async () => {
+    // The sweep fires once a second for the life of the page. A per-message
+    // skip while the breaker is open churns the decision log's whole buffer
+    // in minutes, evicting the failures that opened it — the one piece of
+    // history a diagnosis needs.
+    const log = createDecisionLog({ printing: false })
+    const h = makePolicy({
+      config: { failureCircuitThreshold: 2, failureCircuitCooldownMs: 30_000 },
+      messages: [message({ id: 'a' }), message({ id: 'b' }), message({ id: 'c' })],
+      log,
+    })
+    h.ensureForView.mockImplementation(async () => ({
+      outcome: 'queued',
+      done: Promise.reject(Object.assign(new Error('boom'), { code: 'internal' })),
+      sent: Promise.resolve(true),
+    }))
+    await h.policy.onCandidate('a')
+    await h.policy.onCandidate('a')
+    expect(h.policy.stats().circuitOpen).toBe(true)
+
+    h.visible.add('a')
+    h.visible.add('b')
+    h.visible.add('c')
+    const before = log.records().length
+    for (let tick = 0; tick < 10; tick += 1) await h.policy.recheckVisible()
+
+    expect(log.records().length).toBe(before)
+  })
+
+  test('stays silent while the rate limit is saturated', async () => {
+    const log = createDecisionLog({ printing: false })
+    const h = makePolicy({
+      config: { maxRequestsPerMinute: 1 },
+      messages: [message({ id: 'a' }), message({ id: 'b' })],
+      log,
+    })
+    await h.policy.onCandidate('a')
+
+    h.visible.add('a')
+    h.visible.add('b')
+    const before = log.records().length
+    for (let tick = 0; tick < 10; tick += 1) await h.policy.recheckVisible()
+
+    expect(log.records().length).toBe(before)
+  })
+})
