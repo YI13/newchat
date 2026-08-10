@@ -1,6 +1,7 @@
 import 'fake-indexeddb/auto'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { createTranslationCache } from '@/lib/idbTranslationCache'
+import { createDecisionLog } from './decisionLog'
 import { createTranslationStore } from './store'
 
 let disposables = []
@@ -44,6 +45,7 @@ function makeStore(overrides = {}) {
     translate,
     cache,
     config: { maxConcurrent: 4, ...overrides.config },
+    log: overrides.log,
   })
   return { store, translate, cache }
 }
@@ -919,5 +921,80 @@ describe('revert racing an in-progress view decision', () => {
     expect(result.outcome).not.toBe('queued')
     expect(translate).not.toHaveBeenCalled()
     expect(store.getEntry('m1').status).toBe('idle')
+  })
+})
+
+describe('a local fault is not a backend failure', () => {
+  test('a translation whose cache write fails is still translated', async () => {
+    // Quota exhausted, private-mode database, corrupt store. The backend
+    // replied correctly and the text is in hand; the only loss is that it has
+    // to be fetched again next time. Reporting this as a failed translation
+    // discards a good result, shows the user an error, and — because the
+    // policy layer counts settled failures — walks the automatic circuit
+    // breaker toward switching the feature off over a fault the backend had
+    // no part in.
+    const { store, translate, cache } = makeStore()
+    vi.spyOn(cache.content, 'set').mockRejectedValue(new Error('QuotaExceededError'))
+
+    const done = store.translate('m1', job())
+    await flush()
+    translate.calls[0].resolve({ translatedText: 'こんにちは' })
+
+    expect(await done).toMatchObject({ ok: true })
+    expect(store.getEntry('m1')).toMatchObject({
+      status: 'translated',
+      translatedText: 'こんにちは',
+    })
+  })
+
+  test('the failed write is recorded, so a missing cache is still diagnosable', async () => {
+    const log = createDecisionLog({ printing: false })
+    const { store, translate, cache } = makeStore({ log })
+    vi.spyOn(cache.content, 'set').mockRejectedValue(new Error('QuotaExceededError'))
+
+    const done = store.translate('m1', job())
+    await flush()
+    translate.calls[0].resolve({ translatedText: 'こんにちは' })
+    await done
+
+    const violation = log.records().find((r) => r.reason === 'cache-write-failed')
+    expect(violation).toBeDefined()
+    expect(violation.messageId).toBe('m1')
+  })
+})
+
+describe('every path out of translateMessage settles `sent`', () => {
+  // ensureForView reports `outcome: 'queued'` for every call that reaches
+  // translateMessage, and hands back the `sent` promise unconditionally. A
+  // caller that awaits it — the policy layer does, to decide whether to
+  // charge its rate budget — hangs forever on any path that returns without
+  // resolving it, and takes the circuit breaker's probe token down with it.
+  test('the dedupe path resolves it false', async () => {
+    const { store } = makeStore()
+    store.translate('m1', job())
+    await flush()
+
+    let settled = null
+    const second = store.translate('m1', { ...job(), onSent: (v) => (settled = v) })
+
+    await expect(second).resolves.toMatchObject({ deduped: true })
+    expect(settled).toBe(false)
+  })
+
+  test('the refusal path resolves it false', async () => {
+    // The queue ceiling applies to automatic jobs only.
+    const { store } = makeStore({ config: { maxQueueLength: 1, maxConcurrent: 1 } })
+    store.translate('a', { ...job(), origin: 'auto' })
+    await flush()
+    store.translate('b', { ...job(), origin: 'auto' })
+    await flush()
+
+    let settled = null
+    await store.translate('c', {
+      ...job(),
+      origin: 'auto',
+      onSent: (v) => (settled = v),
+    })
+    expect(settled).toBe(false)
   })
 })

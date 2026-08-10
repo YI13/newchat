@@ -300,16 +300,34 @@ export function createTranslationStore({
       if (getEntry(item.messageId).reqSeq !== item.reqSeq) return
 
       const identical = result.translatedText === item.text
-      await cache.content.set({
-        messageId: item.messageId,
-        roomId: item.roomId,
-        targetLang: item.targetLang,
-        srcVersion: item.srcVersion,
-        translatedText: result.translatedText,
-        originalText: item.text,
-      })
 
+      // Settled before the write, not after. The translation succeeded the
+      // moment the backend replied; persisting it is a local convenience. A
+      // full quota, a private-mode database, a corrupt store — each would
+      // otherwise throw here and be caught below as a failed translation:
+      // the text is discarded, the message shows an error, and the automatic
+      // circuit breaker counts a backend that never misbehaved. Five of those
+      // and automatic translation switches itself off. Same rule the policy
+      // layer applies to its own internal errors — a local fault says nothing
+      // about the backend.
       outcome = { ok: true }
+      try {
+        await cache.content.set({
+          messageId: item.messageId,
+          roomId: item.roomId,
+          targetLang: item.targetLang,
+          srcVersion: item.srcVersion,
+          translatedText: result.translatedText,
+          originalText: item.text,
+        })
+      } catch (err) {
+        // Kept in memory and rendered; it simply has to be fetched again next
+        // time this message comes into view.
+        log.emit(DECISION.Violation, item.messageId, {
+          reason: 'cache-write-failed',
+          error: err,
+        })
+      }
       if (getEntry(item.messageId).reqSeq !== item.reqSeq) return
       setEntry(item.messageId, {
         status: 'translated',
@@ -374,6 +392,13 @@ export function createTranslationStore({
       current.srcVersion === srcVersion
     if (alreadyRunning) {
       log.emit(DECISION.Deduped, messageId, { origin, status: current.status })
+      // Symmetrical with the refusal below, and for a harder reason:
+      // ensureForView reports 'queued' for every call that reaches this
+      // function, so the `sent` promise it hands back has to settle on every
+      // path out of it. A caller that awaits `sent` — the policy layer does,
+      // to decide whether to charge its rate budget — would otherwise wait
+      // forever, holding the probe token with it.
+      onSent?.(false)
       return Promise.resolve({ ok: true, deduped: true })
     }
 

@@ -100,13 +100,29 @@ export function createAutoPolicy({
   let circuitCooldownMs = cfg.failureCircuitCooldownMs
   let probing = false
 
+  /**
+   * Pure predicate — deliberately. An earlier version claimed the probe token
+   * here, in the same expression that tested for it. Every path that returned
+   * between the test and the request then kept a token nothing would ever give
+   * back: a rate-limited skip, or a throw from the store. `probing` stays true,
+   * every later candidate reads it as "a probe is already out", and automatic
+   * translation is off for the rest of the session with the backend healthy.
+   * The token is claimed at the point of use instead — see offerCandidate.
+   */
   function circuitBlocks() {
     if (consecutiveFailures < cfg.failureCircuitThreshold) return false
     if (now() < circuitOpenUntil) return true
     // Cooldown elapsed: let exactly one request through to test the water.
-    if (probing) return true
+    return probing
+  }
+
+  /** True when the breaker is open and this call is the one probe allowed
+   *  through. Separate from circuitBlocks so the predicate can be called for
+   *  its answer alone — the sweep does exactly that, every second. */
+  function claimProbe() {
+    if (consecutiveFailures < cfg.failureCircuitThreshold) return false
     probing = true
-    return false
+    return true
   }
 
   function rateLimited() {
@@ -156,6 +172,12 @@ export function createAutoPolicy({
     try {
       return await offerCandidate(messageId)
     } catch (err) {
+      // The throw may have happened after the probe token was claimed, in
+      // which case nothing downstream will settle and release it. This is the
+      // broken-IndexedDB case the silent-skip rule above was written for, and
+      // leaving the token held would turn a local fault into a permanently
+      // open circuit.
+      probing = false
       log.emit(DECISION.Skip, messageId, { reason: SKIP.InternalError, error: err })
       return { skipped: SKIP.InternalError }
     }
@@ -184,6 +206,10 @@ export function createAutoPolicy({
       })
     }
     if (rateLimited()) return skip(SKIP.RateLimited, { inWindow: recentRequests.length })
+
+    // Last gate passed: this call is going to the store, so it is now safe to
+    // claim the probe token. Everything that can decline is behind us.
+    claimProbe()
 
     const result = await store.ensureForView(messageId, {
       roomId: ctx.roomId,
@@ -262,6 +288,16 @@ export function createAutoPolicy({
     // the history a diagnosis needs.
     const ctx = getContext()
     if (!ctx.autoTranslate || !ctx.active) return
+
+    // The circuit and the rate limit are global state, not per-message, so
+    // they belong in the same pre-loop gate for the same reason. Left to the
+    // per-message path they log one identical skip per visible message per
+    // tick: twelve messages on screen fills the whole buffer in under three
+    // minutes, and the cooldown doubles, so the failures that opened the
+    // circuit are guaranteed to be evicted before anyone reads the log.
+    // Safe only because circuitBlocks is a pure predicate — calling it here
+    // once a second must not claim the probe token.
+    if (circuitBlocks() || rateLimited()) return
 
     for (const id of ids) {
       if (store.getEntry(id).status !== 'idle') continue
