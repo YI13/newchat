@@ -169,3 +169,22 @@ D-3 是缺陷 #16、D-4 是缺陷 #14 的直接驗證。D-4 失敗代表 probe t
 | `skip reason=circuit-open` 反覆出現 | 斷路器沒關回去 | probe token 洩漏(M10/M11) |
 | 停在 `enqueue` | 佇列裡等不到 | 之後應有 `drop` 或 `send`;都沒有代表 job 被靜默丟棄 |
 | `settle ok=false` 但後端正常 | 本地故障被誤判 | 快取寫入(M13) |
+
+### Phase B 之前:`result=idle` 是四個原因壓成的同一個字
+
+Phase A 的 log 分不出下面四種情況,這是 B3 存在的理由。在補上 drop 點的 log
+之前,**先看有沒有 `start`** —— 它一行就砍掉一半的可能性:
+
+| 來源 | 有 `start`? | 意思 |
+|---|---|---|
+| pump 的 G5 | ❌ | 離開視窗 |
+| pump 的斷路器 | ❌ | 冷卻中 |
+| `run()` 的 G1 提前返回 | ✅ | `reqSeq` 被 bump,結果作廢 |
+| `run()` 的 catch,`origin === 'auto'` | ✅ | **翻譯失敗,靜默重置成 idle** |
+
+pump 的兩條都在 `run()` 之前 `continue`,所以**看到 `start` 就排除了可視性和
+斷路器**。剩下兩條的區分方法:在 catch 裡印一行 `e?.name / e?.code`。有輸出
+就是翻譯失敗,沒有就是 G1。
+
+第四列是最容易被誤讀的一條:自動路徑的失敗**刻意不顯示錯誤**,所以它在 UI 上
+和「沒被翻譯」完全一樣,在 log 上和 G1 也完全一樣。

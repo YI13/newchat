@@ -63,7 +63,12 @@ comparator 裡讀。
 
 ### A5 — 新增 `visibilitychange` → `rebuild()`
 接在既有的 hidden 監聽同一個 handler,不要新增第二個 listener。
-**驗收:** 分頁切到背景 10 秒再切回,畫面上的未翻譯訊息會開始翻譯。
+**先讀 §A.4 那則 ⚠️** —— `rebuild()` 在 Phase A 會帶來一輪 churn(sweep 要到
+Phase D 才存在)。可接受,但要知道它會出現在 A8 的 log 裡。**不要**為了消除它
+去加抑制集合,理由見 `00-assessment.md` §7 對開放問題 2 的答覆。
+**驗收:** 分頁切到背景 10 秒再切回,畫面上的未翻譯訊息會開始翻譯。純捲動
+(不切分頁)時 `rebuild()` 的呼叫次數為 **0** —— 不是 0 就表示有別處在呼叫它,
+查 `setRoot()`。
 
 ### A6 — 移植 `visibilityObserver.test.ts`
 參考實作 §9.3,`.js` → `.ts`,import 路徑對齊。

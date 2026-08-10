@@ -410,6 +410,23 @@ document.addEventListener('visibilitychange', () => {
 > 如果現有的 hidden 監聽寫在 React effect 裡,`rebuild()` 加在同一個 handler
 > 即可,不要另外新增一個 listener。
 
+> ⚠️ **`rebuild()` 會帶來一個 Phase A 還沒有修復路徑的窗口。** 它同步清空
+> `visibleIds`,而 IO 的新 entry 是非同步送達的。這中間如果 `pump()` 跑了,
+> G5 會把當下佇列裡的工作全部判定為不可見而丟掉。
+>
+> 在完整系統裡這由 sweep(`recheckVisible`)修復,**但 sweep 是 Phase D**。
+> Phase A 只能靠觀察器自己補:entry 一到就重新 `markVisible` → 起新 dwell →
+> 400ms 後重新發候選。所以結果是**一輪 churn,不是遺失** —— 但你會在 log 裡
+> 看到一批訊息同時 `queued → idle → queued`,那是預期的,不是 bug。
+>
+> 觸發時機只有「分頁回前景」,一次前景一輪。如果你在**純捲動**測試中看到這個
+> 形狀,先數 `rebuild()` 被呼叫幾次 —— 若不是 0,表示有別的地方在呼叫它,
+> 最可能是 `setRoot()`(它內部會 `rebuild()`)。Phase A **沒有**要求接
+> `setRoot`,如果接了而且傳入每次 render 都變的元素,就會反覆重建。
+>
+> 覺得這輪 churn 干擾 A8 的量測,可以先不做 A5,把它挪到 Phase D 的 D4 之後
+> —— 代價是「背景分頁回前景」這個情境要晚幾相才修好。
+
 ---
 
 ## A.5 Phase A 不做的事
