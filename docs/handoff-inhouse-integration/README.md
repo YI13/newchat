@@ -26,6 +26,7 @@
 | `06-verification.md` | 每個 Phase 結束時 | 該 Phase 的測試、突變清單、瀏覽器冒煙步驟 |
 | `07-fix-registry-ownership.md` | **Phase A 已完成、發現註冊表失明時** | 修正包:`destroy()` 的歸屬。兩個缺陷、三步修正、三條測試,全含程式碼 |
 | `08-fix-retry-budget-and-refs.md` | **Phase A 已完成,但活躍房間裡自動翻譯不動作時** | 修正包:自動路徑的請求預算 + ref 身分穩定性。四步修正、四條測試,全含程式碼 |
+| `09-error-notices.md` | **要讓手動翻譯在後端限流 / 不可用時提示使用者時** | 功能包:`too_many_requests` / `unavailable` 兩個 code 的提示。四步實作、六條測試,全含程式碼 |
 
 ## 相位總覽
 
@@ -75,6 +76,11 @@ Phase A 只換觀察器。如果症狀在 A 之後就消失大半,你就知道�
 8. **不要讓自動路徑跑傳輸層的重試階梯。** 斷路器已經在管退避了,底下再跑一次會讓
    「開斷路器所需的 5 次失敗」變成 15 個真實請求,而且整條階梯都佔著只有兩個的
    auto slot。自動路徑傳 `maxAttempts: 1`,手動維持預設。
+
+9. **不要把翻譯的錯誤文案掛在 `reason` 上。** 全域的 reason 文案表是所有服務共用的,
+   而 `upstream_unavailable` 已經被 auth-service / portal-service 使用 —— 加一筆
+   「翻譯服務無法使用」會改寫它們的錯誤。以 `code` 為鍵、放在翻譯自己的模組裡。
+   實作包在 `09-error-notices.md`。
 
 ## 參考實作的四個缺陷已經修好
 
