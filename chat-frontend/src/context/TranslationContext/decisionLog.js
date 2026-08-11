@@ -21,6 +21,10 @@ export const DECISION = {
   Visible: 'visible',
   Hidden: 'hidden',
   Dwell: 'dwell',
+  // Not message-scoped: carries a null messageId. Suspending the tracker
+  // stops every candidate at once, so without a marker the log just goes
+  // quiet — indistinguishable from the registry going blind.
+  Tracker: 'tracker',
   // policy
   Skip: 'skip',
   Cached: 'cached',

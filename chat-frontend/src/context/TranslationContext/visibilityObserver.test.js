@@ -381,3 +381,118 @@ describe('ordering', () => {
     expect(observer.byDistanceFromCentre(['far', 'near'])).toEqual(['near', 'far'])
   })
 })
+
+// Suspending is not destroying. The registry belongs to the mounted message
+// components — they call observe()/unobserve() from their own refs — so a
+// suspend that clears it leaves nothing to resume over, and the rows will not
+// re-mount just because a setting changed.
+describe('setEnabled', () => {
+  /** Drive one element into view on whichever observer is currently live. */
+  function show(el, top = 100) {
+    placeAt(el, top)
+    latest().emit([{ target: el, isIntersecting: true, top }])
+  }
+
+  test('stops watching without forgetting what is mounted', () => {
+    const { observer } = makeObserver()
+    observer.observe('m1', makeEl('m1'))
+    observer.observe('m2', makeEl('m2'))
+    const io = latest()
+
+    observer.setEnabled(false)
+
+    expect(io.disconnected).toBe(true)
+    expect(observer.registeredIds()).toEqual(['m1', 'm2'])
+  })
+
+  test('builds no observer at all while suspended', () => {
+    const { observer } = makeObserver()
+    observer.setEnabled(false)
+
+    observer.observe('m1', makeEl('m1'))
+
+    // Registering while off must record the element and nothing else —
+    // otherwise the IntersectionObserver comes back to life through the side
+    // door and the whole point is lost.
+    expect(instances).toHaveLength(0)
+    expect(observer.registeredIds()).toEqual(['m1'])
+  })
+
+  test('drops a dwell that was already counting down', () => {
+    const { observer, onCandidate } = makeObserver()
+    const el = makeEl('m1')
+    observer.observe('m1', el)
+    show(el)
+    vi.advanceTimersByTime(200)
+
+    observer.setEnabled(false)
+    vi.advanceTimersByTime(10_000)
+
+    expect(onCandidate).not.toHaveBeenCalled()
+    expect([...observer.visibleIds]).toEqual([])
+  })
+
+  test('resumes over the rows that are still mounted, with no re-mount', () => {
+    // The whole point. Turning the switch back on re-renders nothing, so if
+    // resume does not re-observe the existing registry the tracker comes back
+    // watching an empty set and automatic translation stays dead — the same
+    // failure shape as tearing the registry down on a room change.
+    const { observer, onCandidate } = makeObserver()
+    const el = makeEl('m1')
+    observer.observe('m1', el)
+    observer.setEnabled(false)
+
+    observer.setEnabled(true)
+    expect(latest().observed.has(el)).toBe(true)
+
+    show(el)
+    vi.advanceTimersByTime(500)
+    expect(onCandidate).toHaveBeenCalledWith('m1')
+  })
+
+  test('a row mounted while suspended is picked up on resume', () => {
+    const { observer, onCandidate } = makeObserver()
+    observer.setEnabled(false)
+    const el = makeEl('m1')
+    observer.observe('m1', el)
+
+    observer.setEnabled(true)
+    show(el)
+    vi.advanceTimersByTime(500)
+
+    expect(onCandidate).toHaveBeenCalledWith('m1')
+  })
+
+  test('a row unmounted while suspended is not resurrected on resume', () => {
+    const { observer } = makeObserver()
+    observer.observe('m1', makeEl('m1'))
+    observer.setEnabled(false)
+    observer.unobserve('m1')
+
+    observer.setEnabled(true)
+
+    expect(observer.registeredIds()).toEqual([])
+  })
+
+  test('repeating the same state is a no-op', () => {
+    const { observer } = makeObserver()
+    observer.observe('m1', makeEl('m1'))
+    const io = latest()
+
+    observer.setEnabled(true)
+
+    expect(latest()).toBe(io)
+    expect(observer.registeredIds()).toEqual(['m1'])
+  })
+
+  test('changing the scroll root while suspended stays suspended', () => {
+    const { observer } = makeObserver()
+    observer.observe('m1', makeEl('m1'))
+    observer.setEnabled(false)
+    const count = instances.length
+
+    observer.setRoot(document.createElement('div'))
+
+    expect(instances).toHaveLength(count)
+  })
+})

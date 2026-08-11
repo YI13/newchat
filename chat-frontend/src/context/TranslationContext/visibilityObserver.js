@@ -40,6 +40,11 @@ export function createVisibilityObserver({
   let currentRoot = root
   let observer = null
   let viewportCentre = null
+  // Suspended is a state of the *watching*, never of the registry. `elements`
+  // is written by the mounted message components through their own refs, and
+  // nothing here may clear it on their behalf — a resume has to re-observe
+  // exactly what is mounted, and a setting change re-renders none of them.
+  let enabled = config.enabled !== false
 
   function rootMargin() {
     // Positive only. A negative margin shrinks the intersection box, and on a
@@ -111,19 +116,26 @@ export function createVisibilityObserver({
     }
   }
 
+  /** Registering is unconditional; watching is not. While suspended the
+   *  element is recorded and left alone, so a later resume sees the true set
+   *  of mounted rows rather than only those mounted after it. */
+  function watch(element) {
+    if (enabled) ensureObserver().observe(element)
+  }
+
   function observe(id, element) {
     if (!element) return
     // Idempotent: a re-render that re-registers the same element must not
     // restart a dwell the user has already partly served.
     if (elements.get(id) === element) {
-      ensureObserver().observe(element)
+      watch(element)
       return
     }
     if (elements.has(id)) unobserve(id)
 
     elements.set(id, element)
     elementIds.set(element, id)
-    ensureObserver().observe(element)
+    watch(element)
   }
 
   function unobserve(id) {
@@ -148,9 +160,21 @@ export function createVisibilityObserver({
     observer?.disconnect()
     observer = null
 
-    if (elements.size === 0) return
+    if (!enabled || elements.size === 0) return
     const next = ensureObserver()
     for (const element of elements.values()) next.observe(element)
+  }
+
+  /** Suspend or resume watching. Suspending drops every observation, pending
+   *  dwell and visible mark; resuming rebuilds over the registry, which is
+   *  what makes it safe to call from a settings toggle that re-renders
+   *  nothing. Deliberately NOT destroy(): destroy clears the registry, and a
+   *  resume after one would come back watching an empty set. */
+  function setEnabled(next) {
+    if (enabled === next) return
+    enabled = next
+    rebuild()
+    log.emit(DECISION.Tracker, null, { state: enabled ? 'resumed' : 'suspended', registered: elements.size })
   }
 
   function setRoot(nextRoot) {
@@ -222,6 +246,8 @@ export function createVisibilityObserver({
     observe,
     unobserve,
     reset: rebuild,
+    setEnabled,
+    isEnabled: () => enabled,
     setRoot,
     setViewportCentre,
     byDistanceFromCentre,

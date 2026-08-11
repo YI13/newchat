@@ -99,6 +99,10 @@ export function TranslationProvider({ children, translate, cache }) {
       dwellMs: AUTO_TRANSLATE_CONFIG.dwellMs,
       prefetchMarginPx: AUTO_TRANSLATE_CONFIG.prefetchMarginPx,
       log,
+      // Built in whatever state the setting is already in, so a session that
+      // starts with the switch off never runs a single intersection callback.
+      // The effect below keeps it in step from here on.
+      enabled: autoTranslate,
       onCandidate: (id) => {
         candidateId = id
         policy?.onCandidate(id)
@@ -146,12 +150,29 @@ export function TranslationProvider({ children, translate, cache }) {
 
     const snapshot = () => ({
       ...createdStore.inspect(),
+      // Reported so an empty visibleIds against a full registeredIds reads as
+      // "suspended" rather than as the registry going blind — the two look
+      // identical from outside, and only one of them is a fault.
+      trackerEnabled: observer.isEnabled(),
       visibleIds: [...observer.visibleIds],
       registeredIds: observer.registeredIds(),
     })
 
     return { store: createdStore, auto: { policy, observer, log, snapshot } }
   })
+
+  // Nothing downstream of the tracker does any work while the switch is off —
+  // the policy skips at its first gate — so watching at all is pure cost:
+  // an intersection callback per scroll and a dwell timer per row, for
+  // candidates that are all discarded. Suspending stops that at the source.
+  //
+  // Suspend, never destroy. The registry belongs to the mounted rows, and
+  // flipping the switch back on re-renders none of them — a resume that had
+  // to wait for a re-mount would leave the tracker watching nothing, which is
+  // exactly how automatic translation dies silently.
+  useEffect(() => {
+    auto.observer.setEnabled(autoTranslate)
+  }, [auto, autoTranslate])
 
   // A backgrounded tab must not keep translating, and on return the viewport
   // is re-evaluated rather than resuming a queue built for a screen the user

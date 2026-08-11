@@ -6,6 +6,7 @@ import {
   TranslationProvider,
   useAutoTranslateRegistration,
   useTranslationActions,
+  useTranslationSettings,
 } from './TranslationContext'
 
 // Provider wiring test. The modules under it have their own suites; what only
@@ -24,11 +25,18 @@ let ios = []
 class FakeIntersectionObserver {
   constructor(callback) {
     this.callback = callback
+    this.observed = new Set()
     ios.push(this)
   }
-  observe() {}
-  unobserve() {}
-  disconnect() {}
+  observe(el) {
+    this.observed.add(el)
+  }
+  unobserve(el) {
+    this.observed.delete(el)
+  }
+  disconnect() {
+    this.observed.clear()
+  }
 }
 
 const io = () => ios[ios.length - 1]
@@ -232,5 +240,84 @@ describe('failure notices', () => {
 
     expect(translate).toHaveBeenCalled()
     expect(screen.queryByRole('status')).not.toBeInTheDocument()
+  })
+})
+
+// Nothing downstream of the tracker works while the switch is off, so watching
+// is pure cost. Suspending it is only safe if resuming does not depend on the
+// rows re-mounting — flipping a setting re-renders none of them.
+describe('the tracker follows the switch', () => {
+  const message = { id: 'm1', content: '早安', sender: { account: 'bob' }, editedAt: 0 }
+
+  function Toggle() {
+    const { autoTranslate, setAutoTranslate } = useTranslationSettings()
+    return (
+      <button type="button" onClick={() => setAutoTranslate(!autoTranslate)}>
+        toggle
+      </button>
+    )
+  }
+
+  function renderWithSwitch(translate) {
+    return render(
+      <TranslationProvider translate={translate} cache={makeCache()}>
+        <Toggle />
+        <Row message={message} />
+      </TranslationProvider>,
+    )
+  }
+
+  test('watches nothing while the switch starts off', async () => {
+    setAutoTranslate(false)
+    const translate = vi.fn(async () => ({ translatedText: 'x', targetLang: 'ja' }))
+    renderWithSwitch(translate)
+
+    // No IntersectionObserver was ever constructed: the rows registered, but
+    // registering while suspended records the element and stops there.
+    expect(ios).toHaveLength(0)
+    await sleep(600)
+    expect(translate).not.toHaveBeenCalled()
+  })
+
+  test('picks up the rows already on screen when the switch goes on', async () => {
+    // The regression that matters. Turning it on re-renders nothing, so a
+    // resume that waited for a re-mount would come back watching an empty set
+    // and automatic translation would stay dead until the user changed rooms.
+    setAutoTranslate(false)
+    const translate = vi.fn(async (_n, { text, targetLang }) => ({
+      translatedText: `[${targetLang}] ${text}`,
+      targetLang,
+    }))
+    renderWithSwitch(translate)
+
+    act(() => {
+      screen.getByRole('button', { name: 'toggle' }).click()
+    })
+
+    // The row was re-observed without re-mounting.
+    const el = document.querySelector('[data-message-id="m1"]')
+    expect(io().observed.has(el)).toBe(true)
+
+    // The browser delivers an initial entry for a newly observed element; the
+    // fake needs telling.
+    show('m1')
+    await sleep(600)
+    expect(translate).toHaveBeenCalledTimes(1)
+  })
+
+  test('stops watching when the switch goes off', async () => {
+    setAutoTranslate(true)
+    const translate = vi.fn(async () => ({ translatedText: 'x', targetLang: 'ja' }))
+    renderWithSwitch(translate)
+    const before = io()
+
+    act(() => {
+      screen.getByRole('button', { name: 'toggle' }).click()
+    })
+
+    expect(before.observed.size).toBe(0)
+    show('m1')
+    await sleep(600)
+    expect(translate).not.toHaveBeenCalled()
   })
 })
