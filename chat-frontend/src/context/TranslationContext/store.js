@@ -292,7 +292,12 @@ export function createTranslationStore({
         translate(
           nats,
           { text: item.text, targetLang: item.targetLang },
-          { signal: controller.signal },
+          // One attempt on the automatic path: its circuit breaker already
+          // owns backoff, and a transport-level ladder underneath would spend
+          // three requests per job against a backend that is already failing,
+          // holding one of two auto slots for the length of the ladder. A
+          // manual request has nothing watching it, so it keeps the default.
+          { signal: controller.signal, ...(isAuto ? { maxAttempts: 1 } : {}) },
         ),
       )
       release()

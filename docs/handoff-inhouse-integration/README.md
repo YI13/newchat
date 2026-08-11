@@ -25,6 +25,7 @@
 | `05-subtasks.md` | **開工前讀一次,之後每完成一項回來勾** | A1–D10 子任務、相依圖、每項的驗收條件 |
 | `06-verification.md` | 每個 Phase 結束時 | 該 Phase 的測試、突變清單、瀏覽器冒煙步驟 |
 | `07-fix-registry-ownership.md` | **Phase A 已完成、發現註冊表失明時** | 修正包:`destroy()` 的歸屬。兩個缺陷、三步修正、三條測試,全含程式碼 |
+| `08-fix-retry-budget-and-refs.md` | **Phase A 已完成,但活躍房間裡自動翻譯不動作時** | 修正包:自動路徑的請求預算 + ref 身分穩定性。四步修正、四條測試,全含程式碼 |
 
 ## 相位總覽
 
@@ -65,6 +66,15 @@ Phase A 只換觀察器。如果症狀在 A 之後就消失大半,你就知道�
    註冊表歸掛載中的訊息元件所有(它們自己 `observe`/`unobserve`),父層從
    `useEffect` 清它會 race 掉剛掛載的列:ref 在 layout phase 附加,父層 effect 在
    passive phase 才跑。已經照舊版做過的話,修正包在 `07-fix-registry-ownership.md`。
+
+7. **不要把每次 render 新建的函式當 ref 傳下去。** ref prop 換身分,React 會先用
+   `null` 呼叫舊的再用元素呼叫新的 —— 於是每次父層 re-render 都是一輪
+   `unobserve`/`observe`,dwell 從零重算。`useCallback(fn, [])` 不夠,memo 的是
+   產生器不是它回傳的閉包;要以 id 為鍵快取。修正包在 `08-fix-retry-budget-and-refs.md`。
+
+8. **不要讓自動路徑跑傳輸層的重試階梯。** 斷路器已經在管退避了,底下再跑一次會讓
+   「開斷路器所需的 5 次失敗」變成 15 個真實請求,而且整條階梯都佔著只有兩個的
+   auto slot。自動路徑傳 `maxAttempts: 1`,手動維持預設。
 
 ## 參考實作的四個缺陷已經修好
 

@@ -164,7 +164,8 @@ D-3 是缺陷 #16、D-4 是缺陷 #14 的直接驗證。D-4 失敗代表 probe t
 |---|---|---|
 | 沒有任何記錄 | 元素從未註冊 | ref callback / `observe()` 呼叫點 |
 | 停在 `observe` | IO 從未回報交集 | `rootMargin`、`root` 設錯,或元素高度為 0 |
-| 停在 `visible` | dwell 被取消 | 使用者捲太快,或 re-render 打斷(A1 應已修好) |
+| 停在 `visible` | dwell 被取消 | 使用者捲太快,或 ref 不穩定(見下) |
+| `visible → hidden → visible` 反覆循環 | 每次 re-render 都重新註冊 | ref 鏈上有一環每次 render 產生新函式 |
 | 停在 `dwell` | policy 擋掉了 | 下一筆 `skip` 的 `reason` |
 | `skip reason=circuit-open` 反覆出現 | 斷路器沒關回去 | probe token 洩漏(M10/M11) |
 | 停在 `enqueue` | 佇列裡等不到 | 之後應有 `drop` 或 `send`;都沒有代表 job 被靜默丟棄 |
@@ -188,3 +189,18 @@ pump 的兩條都在 `run()` 之前 `continue`,所以**看到 `start` 就排除�
 
 第四列是最容易被誤讀的一條:自動路徑的失敗**刻意不顯示錯誤**,所以它在 UI 上
 和「沒被翻譯」完全一樣,在 log 上和 G1 也完全一樣。
+
+### `visible → hidden → visible` 循環:ref 不穩定
+
+觀察器的冪等保護擋的是「連續 `observe` 兩次」。它擋不住 `unobserve` 之後再
+`observe` —— 那是全新註冊,**dwell 從零重算**。而只要 ref prop 每次 render
+換一個函式身分,React 就會先用 `null` 呼叫舊的(→ `unobserve`)、再用元素呼叫
+新的(→ `observe`),於是每一次父層 re-render 都跑一輪。
+
+新訊息一到就 re-render 的聊天室裡,只要 re-render 密度高於 `dwellMs`,就沒有
+訊息跑得完 dwell。**症狀是自動翻譯完全不動作,但 log 看起來很忙。**
+
+查法:對任一則可見訊息跑 `__translate.timeline(id)`,若 `visible` / `hidden`
+成對反覆出現而始終沒有 `dwell`,就是這條。ref 鏈上**每一環**都要穩定 ——
+產生 ref 的函式、`mergedRef`、以及 `visibilityRef`。`useCallback(fn, [])`
+memo 的是產生器,不是它回傳的閉包。
