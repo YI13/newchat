@@ -1,8 +1,9 @@
 # Phase A — 換掉 `visibilityTracker.ts`
 
 **耦合最低、回報最高。** 一次修掉 `00-assessment.md` 的 B1/B2/B3 三個決定性
-缺陷。動三個檔案:`visibilityTracker.ts` 整檔替換、`autoPolicy.ts` 兩處
-`reset` 呼叫、`store.ts` 三行排序。不碰快取、不碰佇列語意、不碰 policy 邏輯。
+缺陷。動三個檔案:`visibilityTracker.ts` 整檔替換、`autoPolicy.ts` 的 `reset`
+呼叫、`store.ts` 三行排序,外加元件層兩個 effect 的拆分(§A.4)。不碰快取、
+不碰佇列語意、不碰 policy 邏輯。
 
 做完之後**先上線量測再往下走**。這是整個計畫裡唯一能單獨回答「根因是不是在
 觀察器」的一步。
@@ -56,7 +57,8 @@ export interface VisibilityObserverApi {
   setRoot(next: Element | null): void;
   setViewportCentre(value: number | null): void;
   byDistanceFromCentre(ids: Iterable<string>): string[];
-  /** Drop everything, including the registry. For room switch and logout. */
+  /** Drop everything, including the registry. ONLY for the whole chat surface
+   *  unmounting, or logout — never for a room switch or the feature toggle. */
   destroy(): void;
 }
 
@@ -329,8 +331,9 @@ export const visibilityObserver = {
    * on blinded the observer to every already-mounted message (defect B2).
    *
    * Here the two meanings are separate:
-   *   destroy() — forget everything, including the registry. Room switch,
-   *               logout, resetAutoPolicy().
+   *   destroy() — forget everything, including the registry. ONLY for the
+   *               whole chat surface unmounting, or logout. Not for a room
+   *               switch and not for the feature toggle — see A.4.
    *   rebuild() — keep the registry, rebuild the observer over it. Scroll
    *               container change, tab returning to the foreground.
    *
@@ -391,8 +394,35 @@ autoJobs.sort((a, b) => rank.get(a.messageId)! - rank.get(b.messageId)!);
 |---|---|---|---|
 | `autoPolicy.ts` `startAutoPolicy()` | `visibilityObserver.reset()` | **整行刪掉** | 打開自動翻譯不該讓觀察器忘記已掛載的訊息。這正是 B2 |
 | `autoPolicy.ts` `resetAutoPolicy()` | `visibilityObserver.reset()` | `visibilityObserver.destroy()` | 真的要清空 |
-| 換房間的地方(`setAutoPolicyRoom` 或元件層) | `visibilityObserver.reset()` | `visibilityObserver.destroy()` | 舊房間的訊息必須離開註冊表 |
+| 換房間的地方(`setAutoPolicyRoom` 或元件層) | `visibilityObserver.reset()` | **整行刪掉** | 見下方 ⚠️ —— 註冊表歸元件所有 |
 | 尚不存在 | — | `visibilityObserver.rebuild()` | **新增**:接到 `visibilitychange` 回前景時 |
+
+### 元件層:房間與開關要分成兩個 effect
+
+一個 effect 同時吃 `[roomId, autoTranslate]`,關開關就會跑到 cleanup,而 cleanup
+裡的 `resetAutoPolicy()` 會 `destroy()` 掉註冊表 —— 開關再打開時面對的是空的
+註冊表,而訊息元件不會因此重新註冊。這是 B2 換一條路徑重演。
+
+```ts
+// Room lifecycle. The registry follows what is mounted.
+useEffect(() => {
+  setAutoPolicyRoom(roomId);
+  return () => setAutoPolicyRoom(null);
+}, [roomId]);
+
+// Switch lifecycle. Non-destructive in both directions — the rows stay
+// registered while the feature is off, and every candidate is gated by
+// getContext().autoTranslate downstream.
+useEffect(() => {
+  if (autoTranslate) startAutoPolicy();
+  else stopAutoPolicy();
+}, [autoTranslate]);
+```
+
+`resetAutoPolicy()`(唯一會 `destroy()` 的入口)只在**整個聊天介面卸載或登出**
+時呼叫,不要放在這兩個 effect 的 cleanup 裡。
+
+---
 
 `visibilitychange` 的新接線(放在既有 `setAutoPolicyHidden` 的同一處):
 
@@ -409,6 +439,26 @@ document.addEventListener('visibilitychange', () => {
 
 > 如果現有的 hidden 監聽寫在 React effect 裡,`rebuild()` 加在同一個 handler
 > 即可,不要另外新增一個 listener。
+
+> ⚠️ **`destroy()` 只在整個聊天介面卸載或登出時呼叫 —— 換房間和開關切換都不要。**
+>
+> 註冊表的擁有者是**掛載中的訊息元件**:它們在 ref callback 附加時 `observe`、
+> 收到 `null` 時 `unobserve`。從父層的 `useEffect` 呼叫 `destroy()` 是在跟子元件
+> 的註冊搶時序,而且搶輸:
+>
+> ```
+> mutation phase  → 舊 ref 收到 null(unobserve)
+> layout phase    → 新 ref 附加 —— 新訊息在這裡 observe()
+> passive effects → 子元件先、父元件後 —— 父層的 useEffect 在這裡才跑
+>                   → destroy() 把剛剛註冊好的全部清掉
+> ```
+>
+> 換房間時每次都會發生,而且和 B2 是同一個失效:註冊表空了,只能靠 re-render
+> 意外恢復。**元件自己會 `unobserve`,父層不需要幫它清。**
+>
+> 同理,關閉自動翻譯開關時要呼叫 `stopAutoPolicy()`(非破壞性),不是
+> `resetAutoPolicy()`。訊息還掛在畫面上,註冊表不該被清 —— 下游一律由
+> `getContext().autoTranslate` 擋住。開關再打開時才不會對著空的註冊表發呆。
 
 > ⚠️ **`rebuild()` 會帶來一個 Phase A 還沒有修復路徑的窗口。** 它同步清空
 > `visibleIds`,而 IO 的新 entry 是非同步送達的。這中間如果 `pump()` 跑了,
