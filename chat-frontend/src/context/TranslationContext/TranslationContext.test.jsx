@@ -1,7 +1,12 @@
-import { render } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { setAutoTranslate, setTargetLang } from '@/lib/translationSettings'
-import { TranslationProvider, useAutoTranslateRegistration } from './TranslationContext'
+import { ToastProvider } from '@/context/ToastContext'
+import {
+  TranslationProvider,
+  useAutoTranslateRegistration,
+  useTranslationActions,
+} from './TranslationContext'
 
 // Provider wiring test. The modules under it have their own suites; what only
 // this level can catch is a seam the provider itself gets wrong — found live:
@@ -44,6 +49,23 @@ function makeCache() {
 function Row({ message }) {
   const register = useAutoTranslateRegistration(message, 'r1')
   return <div ref={register} data-message-id={message.id} />
+}
+
+function ManualTranslateButton({ message }) {
+  const { translate } = useTranslationActions()
+  return (
+    <button type="button" onClick={() => translate(message, 'r1')}>
+      Translate
+    </button>
+  )
+}
+
+/** Stand-in for the errcode envelope the transport throws. */
+function envelope(code, reason) {
+  const err = new Error(`stub: ${code}`)
+  err.code = code
+  if (reason) err.reason = reason
+  return err
 }
 
 function show(id) {
@@ -133,5 +155,82 @@ describe('foregrounding a tab that loaded in the background', () => {
     await sleep(600)
 
     expect(translate).not.toHaveBeenCalled()
+  })
+})
+
+// A failed translation is a UI state, not a rejected promise — the store
+// settles an outcome descriptor and never throws. So the toast can only come
+// from the one seam that knows the user asked for this: the manual action.
+describe('failure notices', () => {
+  const message = { id: 'm1', content: '早安', sender: { account: 'bob' }, editedAt: 0 }
+
+  function renderManual(translate) {
+    return render(
+      <ToastProvider>
+        <TranslationProvider translate={translate} cache={makeCache()}>
+          <ManualTranslateButton message={message} />
+        </TranslationProvider>
+      </ToastProvider>,
+    )
+  }
+
+  // The toast is plain useState, so the settle that raises it lands outside
+  // React's batching unless the whole round trip is wrapped.
+  async function clickTranslate() {
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Translate' }))
+      await sleep(50)
+    })
+  }
+
+  test.each([
+    ['too_many_requests', 'rate_limited', 'Translation service is busy, retry later'],
+    ['unavailable', 'upstream_unavailable', 'Translation service is unavailable, retry later'],
+  ])('a manual %s tells the user to retry later', async (code, reason, copy) => {
+    renderManual(
+      vi.fn(async () => {
+        throw envelope(code, reason)
+      }),
+    )
+    await clickTranslate()
+    expect(screen.getByRole('status')).toHaveTextContent(copy)
+  })
+
+  test('a manual server fault stays with the inline bar', async () => {
+    renderManual(
+      vi.fn(async () => {
+        throw envelope('internal')
+      }),
+    )
+    await clickTranslate()
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+  })
+
+  test('a manual success says nothing', async () => {
+    renderManual(vi.fn(async () => ({ translatedText: 'Good morning', targetLang: 'ja' })))
+    await clickTranslate()
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+  })
+
+  test('an automatic failure stays silent', async () => {
+    // The same outage that toasts on the manual path must produce nothing on
+    // the automatic one: the user did not ask for this translation, and one
+    // down backend would otherwise toast once per message on screen.
+    const translate = vi.fn(async () => {
+      throw envelope('unavailable', 'upstream_unavailable')
+    })
+
+    render(
+      <ToastProvider>
+        <TranslationProvider translate={translate} cache={makeCache()}>
+          <Row message={message} />
+        </TranslationProvider>
+      </ToastProvider>,
+    )
+    show('m1')
+    await sleep(600)
+
+    expect(translate).toHaveBeenCalled()
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
   })
 })

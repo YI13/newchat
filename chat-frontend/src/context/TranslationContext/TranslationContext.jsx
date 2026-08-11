@@ -11,6 +11,7 @@ import {
 import { translateText } from '@/api'
 import { createTranslateTextStub } from '@/api/translateText/stub'
 import { useNats } from '@/context/NatsContext'
+import { useToast } from '@/context/ToastContext'
 import { translationCache } from '@/lib/idbTranslationCache'
 import {
   DEFAULT_AUTO_TRANSLATE,
@@ -29,6 +30,7 @@ import { AUTO_TRANSLATE_CONFIG, createAutoPolicy } from './autoPolicy'
 import { DECISION, createDecisionLog } from './decisionLog'
 import { checkInvariants } from './invariants'
 import { IDLE_ENTRY, createTranslationStore } from './store'
+import { translationErrorToast } from './translationErrorCopy'
 import { createVisibilityObserver } from './visibilityObserver'
 
 /** How often the queue is audited against its own guarantees. Frequent enough
@@ -356,19 +358,33 @@ export function useTranslationActions() {
   const ctx = useOptionalTranslation()
   const store = ctx?.store
   const targetLang = ctx?.targetLang
+  const { show } = useToast()
 
   const translate = useCallback(
     (message, roomId) => {
       if (!store) return Promise.resolve()
-      return store.translate(message.id, {
-        roomId,
-        text: message.content ?? message.msg ?? '',
-        targetLang,
-        srcVersion: message.editedAt ?? 0,
-        origin: 'manual',
-      })
+      return store
+        .translate(message.id, {
+          roomId,
+          text: message.content ?? message.msg ?? '',
+          targetLang,
+          srcVersion: message.editedAt ?? 0,
+          origin: 'manual',
+        })
+        .then((outcome) => {
+          // The store settles rather than throws, so this is the only place
+          // the outcome is visible — and it is deliberately the manual one.
+          // Automatic failures stay silent: nobody asked for them, and a
+          // single down backend would otherwise raise one notice per message
+          // on screen. An abort is the user's own doing (see original, a new
+          // request superseding this one) and says nothing about the service.
+          if (outcome && !outcome.ok && !outcome.aborted) {
+            show(translationErrorToast(outcome.error))
+          }
+          return outcome
+        })
     },
-    [store, targetLang],
+    [store, targetLang, show],
   )
 
   const revert = useCallback(
