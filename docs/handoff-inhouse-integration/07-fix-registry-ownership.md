@@ -226,8 +226,21 @@ test('destroy() has exactly one caller', async () => {
 
 ---
 
-交接檔的對應更新在 PR #11:`01-phase-A-observer.md` §A.4 的 ⚠️ 與「元件層」小節、
-`04-phase-D-policy.md` 的 `setAutoPolicyRoom`、`05-subtasks.md` 的 A4 與新增的 A4b。
+## 你手上的交接檔副本要換掉哪幾份
+
+本文是自足的 —— 做這次修正不需要回頭讀別的檔案。但你手上那幾份是舊版,裡面還留著
+產生這兩個缺陷的指示,下次讀到就會再做一次。
+
+| 檔案 | 動作 |
+|---|---|
+| `05-subtasks.md` | **必換。** A4 仍寫著「換房間改為 `destroy()`」。這是你逐項打勾的清單,不換就會把 F1 改回去。新版另有 A4b |
+| `01-phase-A-observer.md` | **建議換。** §A.4 的呼叫點表同樣是舊的。這次不換不會出事(本文已覆蓋),但換一個 session 從頭接 Phase A 就會重新引入 |
+| `04-phase-D-policy.md` | 不用動 —— 還沒交付給你。等交付時會是修正後的版本 |
+
+判斷版本:`05-subtasks.md` 的 **A4 標題是「處理其餘 `reset()` 呼叫點」而且有 A4b**
+才是新版;舊版是「其餘 `reset()` 呼叫點改為 `destroy()`」、沒有 A4b。
+
+---
 
 這兩個缺陷是照著我寫錯的交接檔做出來的,不是實作失誤。後面幾相如果覺得哪裡不對,
 請照樣提 —— 上一次的 `distanceToCenter` shim 也是這樣抓到的。
