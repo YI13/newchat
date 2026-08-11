@@ -28,7 +28,7 @@
 | `08-fix-retry-budget-and-refs.md` | **Phase A 已完成,但活躍房間裡自動翻譯不動作時** | 修正包:自動路徑的請求預算 + ref 身分穩定性。四步修正、四條測試,全含程式碼 |
 | `09-error-notices.md` | **要讓手動翻譯在後端限流 / 不可用時提示使用者時** | 功能包:`too_many_requests` / `unavailable` 兩個 code 的提示。四步實作、六條測試,全含程式碼 |
 | `10-suspend-tracker.md` | **要在自動翻譯關閉時停掉可見度追蹤時** | 效能包:暫停(不是銷毀)可見度追蹤。兩個先決問題、兩條路線、七條測試,全含程式碼 |
-| `11-audit-cost-and-entry-growth.md` | **長時間開著的分頁記憶體持續上升,或想降低閒置成本時** | 效能包:週期性稽核的投影 + entry map 有界淘汰。**開頭有五個要先回報的量測**(其中兩項可能撤掉第三步)、三步修正、七條測試,全含程式碼 |
+| `11-entry-map-growth.md` | **長時間開著的分頁記憶體持續上升時** | 效能包:entry map 的有界淘汰(Zustand + Record 寫法)。三步修正、六條測試,全含程式碼 |
 
 ## 相位總覽
 
@@ -84,9 +84,10 @@ Phase A 只換觀察器。如果症狀在 A 之後就消失大半,你就知道�
    自動翻譯要等到換房間才復活。要暫停「觀看」,保留註冊表,恢復時對它重新 observe。
    實作包在 `10-suspend-tracker.md`。
 
-10. **不要在週期性稽核裡「先過濾再處理」。** `entries.filter(...)` 本身就是走全表,
-   而那正是要消除的成本 —— 那張表整個 session 只增不減。索引必須在**寫入點**維護,
-   稽核只讀索引。實作包在 `11-audit-cost-and-entry-growth.md`。
+10. **不要靠 `Object.keys` 的順序當 LRU 依據。** entry map 整個 session 只增不減,
+   需要有界淘汰;但 `Record` 的鍵序在規格上不保證是插入序,而且讀的人無從得知這段
+   程式碼依賴了它。自己維護一個 `Set` 當順序表,並且淘汰要有遲滯 —— 每次寫入就淘汰
+   一筆會讓 Record 每次都重建。實作包在 `11-entry-map-growth.md`。
 
 11. **不要把翻譯的錯誤文案掛在 `reason` 上。** 全域的 reason 文案表是所有服務共用的,
    而 `upstream_unavailable` 已經被 auth-service / portal-service 使用 —— 加一筆
