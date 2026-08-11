@@ -455,6 +455,32 @@ describe('message edited', () => {
   })
 })
 
+describe('request budget per origin', () => {
+  test('an automatic job asks for exactly one attempt', async () => {
+    const { store, translate } = makeStore()
+
+    store.translate('m1', job({ origin: 'auto' }))
+    await flush()
+
+    // The circuit breaker owns backoff for the automatic path. Letting the
+    // transport run its own retry ladder underneath would turn one auto job
+    // into three real requests against an already saturated backend, and hold
+    // one of only two auto slots for the whole ladder.
+    expect(translate.calls[0].opts.maxAttempts).toBe(1)
+  })
+
+  test('a manual job keeps the default ladder', async () => {
+    const { store, translate } = makeStore()
+
+    store.translate('m1', job())
+    await flush()
+
+    // Nothing is watching a manual request on the user's behalf, so the
+    // transport default applies.
+    expect(translate.calls[0].opts.maxAttempts).toBeUndefined()
+  })
+})
+
 describe('automatic translation gate', () => {
   const auto = (overrides = {}) => ({ ...job(), origin: 'auto', ...overrides })
 
