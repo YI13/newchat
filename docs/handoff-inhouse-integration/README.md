@@ -22,15 +22,16 @@
 | `02-phase-B-decisionlog.md` | 做 Phase B 時 | `decisionLog.ts` 完整程式碼 + 接線點 |
 | `03-phase-C-store.md` | 做 Phase C 時 | `ensureForView` 合約、`sent`/`done` 接線、pump 改動、刪除 pump 斷路器 |
 | `04-phase-D-policy.md` | 做 Phase D 時 | `autoPolicy.ts` 完整替換碼 + 四個 adapter |
-| `05-subtasks.md` | **開工前讀一次,之後每完成一項回來勾** | T0–T24 子任務、相依圖、每項的驗收條件 |
+| `05-subtasks.md` | **開工前讀一次,之後每完成一項回來勾** | A1–D10 子任務、相依圖、每項的驗收條件 |
 | `06-verification.md` | 每個 Phase 結束時 | 該 Phase 的測試、突變清單、瀏覽器冒煙步驟 |
+| `07-fix-registry-ownership.md` | **Phase A 已完成、發現註冊表失明時** | 修正包:`destroy()` 的歸屬。兩個缺陷、三步修正、三條測試,全含程式碼 |
 
 ## 相位總覽
 
 ```
 Phase A ──► Phase B ──► Phase C ──► Phase D
  觀察器      決策 log     store 邊界    policy
- (2 檔)      (1 檔)      (1 檔)       (3 檔)
+ (3 檔)      (1 檔)      (1 檔)       (3 檔)
 
 A 和 B 之間沒有真相依,但 B 先做完會讓 C/D 可驗證。
 C 必須在 D 之前。D 不可拆成兩次上線。
@@ -60,6 +61,10 @@ Phase A 只換觀察器。如果症狀在 A 之後就消失大半,你就知道�
    「查看原文」,清掉就是丟使用者資料。改用 adapter,見 `03-phase-C-store.md`。
 5. **不要在 `observe()` 裡用 `dwellTimers.has(id)` 當冪等守衛。** 正解是綁在
    元素身分上,理由見 `01-phase-A-observer.md`。
+6. **`destroy()` 只在整個聊天介面卸載或登出時呼叫。** 換房間不行,切開關也不行 ——
+   註冊表歸掛載中的訊息元件所有(它們自己 `observe`/`unobserve`),父層從
+   `useEffect` 清它會 race 掉剛掛載的列:ref 在 layout phase 附加,父層 effect 在
+   passive phase 才跑。已經照舊版做過的話,修正包在 `07-fix-registry-ownership.md`。
 
 ## 參考實作的四個缺陷已經修好
 
