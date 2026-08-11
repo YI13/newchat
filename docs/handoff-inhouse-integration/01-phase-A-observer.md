@@ -460,6 +460,25 @@ document.addEventListener('visibilitychange', () => {
 > `resetAutoPolicy()`。訊息還掛在畫面上,註冊表不該被清 —— 下游一律由
 > `getContext().autoTranslate` 擋住。開關再打開時才不會對著空的註冊表發呆。
 
+> ⚠️ **「元件擁有註冊表」有一個前提:ref 必須跨 re-render 保持同一個函式身分。**
+>
+> 上面整套模型假設 ref callback 只在真正 mount / unmount 時觸發。React 的規則是
+> **ref prop 換了新身分就先用 `null` 呼叫舊的、再用元素呼叫新的** —— 所以只要
+> 每次 render 產生新的 ref 函式,每一次父層 re-render 都會變成一輪
+> `unobserve` → `observe`。
+>
+> 這正好繞過觀察器的冪等保護。`observe()` 的 `elements.get(id) === element`
+> 早退只擋得住「連續 observe 兩次」;`unobserve()` 已經把註冊表項目刪掉了,
+> 所以接著的 `observe()` 是全新註冊 —— **dwell 從零重新計時**。
+>
+> 在一則新訊息就會讓父層 re-render 的聊天室裡,只要 re-render 比 `dwellMs`
+> (預設 400ms)還密,**沒有任何訊息能跑完 dwell**,自動翻譯完全不動作,而
+> log 上只會看到 `visible → hidden(cancelledDwell=true)→ visible …` 無限循環。
+>
+> 所以 ref 這條鏈上的**每一環**都要穩定:產生 ref 的那個函式、把兩個 ref 併起來
+> 的 `mergedRef`、以及 `visibilityRef` 本身。`useCallback(fn, [])` **不夠** ——
+> 被 memo 的是產生器,不是它每次回傳的那個新閉包。要用 id 為鍵的快取。
+
 > ⚠️ **`rebuild()` 會帶來一個 Phase A 還沒有修復路徑的窗口。** 它同步清空
 > `visibleIds`,而 IO 的新 entry 是非同步送達的。這中間如果 `pump()` 跑了,
 > G5 會把當下佇列裡的工作全部判定為不可見而丟掉。
