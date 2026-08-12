@@ -256,6 +256,7 @@ export function TranslationProvider({ children, translate, cache }) {
       if (!element) {
         registryRef.current.delete(message.id)
         auto.observer.unobserve(message.id)
+        auto.policy.forget(message.id)
         store.detach(message.id)
         return
       }
@@ -393,6 +394,10 @@ export function useTranslationActions() {
           origin: 'manual',
         })
         .then((outcome) => {
+          // The user just answered the question the sweep had memoised. Both
+          // buttons do this: Translate overrides an 'off' intent, See original
+          // creates one.
+          ctx?.auto?.policy?.forget(message.id)
           // The store settles rather than throws, so this is the only place
           // the outcome is visible — and it is deliberately the manual one.
           // Automatic failures stay silent: nobody asked for them, and a
@@ -409,8 +414,12 @@ export function useTranslationActions() {
   )
 
   const revert = useCallback(
-    (message, roomId) => (store ? store.revert(message.id, roomId) : Promise.resolve()),
-    [store],
+    (message, roomId) => {
+      if (!store) return Promise.resolve()
+      ctx?.auto?.policy?.forget(message.id)
+      return store.revert(message.id, roomId)
+    },
+    [store, ctx],
   )
 
   return { available: !!store, translate, revert }

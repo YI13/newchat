@@ -744,3 +744,93 @@ describe('sweep log volume', () => {
     expect(log.records().length).toBe(before)
   })
 })
+
+// The repair sweep re-offers every idle visible message once a second. For a
+// message that can never be translated — a sticker, your own post — the answer
+// is the same every time, so the sweep spends a store read, the whole rule
+// chain and a log line per message per second, forever. For one the user
+// reverted, it spends an IndexedDB read on top of that.
+describe('the sweep stops re-asking questions whose answer cannot have changed', () => {
+  function sweepTwice(h) {
+    h.visible.add('m1')
+    return h.policy.recheckVisible().then(() => h.policy.recheckVisible())
+  }
+
+  test.each([
+    ['non-textual', message({ content: '😀🎉' })],
+    ['own message', message({ sender: { account: 'alice' } })],
+    ['system message', message({ sysMsgData: { type: 'join' } })],
+  ])('a permanent %s skip is evaluated once, not once per sweep', async (_name, msg) => {
+    const h = makePolicy({ messages: [msg] })
+    const reads = vi.spyOn(h.store, 'getEntry')
+
+    await sweepTwice(h)
+
+    // One store read, from the first sweep. The second recognises the id
+    // before it touches anything.
+    expect(reads).toHaveBeenCalledTimes(1)
+  })
+
+  test('a reverted message costs one intent read, not one per sweep', async () => {
+    // `suppressed` is how ensureForView reports intent === 'off'. Reaching it
+    // means an IndexedDB transaction, and the answer only changes when the
+    // user presses a button.
+    const h = makePolicy()
+    h.ensureForView.mockResolvedValue({ outcome: 'suppressed' })
+
+    await sweepTwice(h)
+
+    expect(h.ensureForView).toHaveBeenCalledTimes(1)
+  })
+
+  test('editing a message re-opens it', async () => {
+    // The whole reason the memo cannot be keyed on id alone: a sticker edited
+    // to add words becomes translatable, and the store sets the entry back to
+    // idle precisely so the sweep picks it up again.
+    const h = makePolicy({ messages: [message({ content: '😀', editedAt: 0 })] })
+    h.visible.add('m1')
+    await h.policy.recheckVisible()
+
+    h.messages.set('m1', message({ content: '😀 morning', editedAt: 7 }))
+    await h.policy.recheckVisible()
+
+    expect(h.ensureForView).toHaveBeenCalledTimes(1)
+  })
+
+  test('forgetting a message re-opens it', async () => {
+    // What the manual Translate / See original buttons call: the user just
+    // changed the answer the memo is holding.
+    const h = makePolicy()
+    h.ensureForView.mockResolvedValue({ outcome: 'suppressed' })
+    await sweepTwice(h)
+
+    h.policy.forget('m1')
+    await h.policy.recheckVisible()
+
+    expect(h.ensureForView).toHaveBeenCalledTimes(2)
+  })
+
+  test('an unknown message is never memoised', async () => {
+    // A message can be absent for a moment while the list is still filling in.
+    // Memoising that would strand it for as long as it stays on screen.
+    const h = makePolicy({ messages: [] })
+    h.visible.add('m1')
+    await h.policy.recheckVisible()
+
+    h.messages.set('m1', message())
+    await h.policy.recheckVisible()
+
+    expect(h.ensureForView).toHaveBeenCalledTimes(1)
+  })
+
+  test('a translatable message is still re-offered every sweep', async () => {
+    // The repair path itself. A message left idle by a full queue has to keep
+    // coming back — memoising it would silently disable the sweep.
+    const h = makePolicy()
+    h.ensureForView.mockResolvedValue({ outcome: 'dropped', sent: Promise.resolve(false) })
+
+    await sweepTwice(h)
+
+    expect(h.ensureForView).toHaveBeenCalledTimes(2)
+  })
+})
