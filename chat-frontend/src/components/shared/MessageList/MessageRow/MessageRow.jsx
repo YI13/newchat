@@ -2,6 +2,11 @@ import MessageActions from './MessageActions/MessageActions'
 import QuotedBlock from '@/components/shared/QuotedBlock/QuotedBlock'
 import useHoverWithDelay from '@/hooks/useHoverWithDelay'
 import { useSubscription } from '@/context/RoomEventsContext'
+import {
+  useAutoTranslateRegistration,
+  useTranslationActions,
+  useTranslationEntry,
+} from '@/context/TranslationContext'
 import { redactInaccessibleQuoteSnapshot } from '@/lib/redactQuote'
 import './style.css'
 
@@ -45,6 +50,12 @@ export default function MessageRow({
   // between them).
   const { hovered, handlers } = useHoverWithDelay(200)
 
+  // Translation is only offered on other people's messages — you do not need
+  // your own words translated, and the automatic policy skips them too.
+  const translation = useTranslationEntry(message.id)
+  const { available: canTranslate, translate, revert } = useTranslationActions()
+  const registerForAutoTranslate = useAutoTranslateRegistration(message, room?.id)
+
   // Mirror history-service's quote redaction client-side: the live broadcast
   // path doesn't gate quote snapshots against the reader's access window, so
   // a quote of a message older than historySharedSince would otherwise leak.
@@ -61,10 +72,21 @@ export default function MessageRow({
   const rowClasses = ['message-row']
   if (isOwn) rowClasses.push('message-row-own')
 
+  // An identical translation shows the source: the backend returned the same
+  // string, so there is nothing to swap in and no "translated" affordance to
+  // offer.
+  const isShowingTranslation =
+    translation.status === 'translated' && !translation.identical
+  const displayedText = isShowingTranslation
+    ? translation.translatedText
+    : messageContent(message)
+  const showTranslationBar = canTranslate && !isOwn && !!messageContent(message)
+
   return (
     <div
       className={rowClasses.join(' ')}
       data-message-id={message.id}
+      ref={registerForAutoTranslate}
       tabIndex={0}
     >
       {!isOwn && (
@@ -89,7 +111,43 @@ export default function MessageRow({
           />
         )}
         <div className="message-bubble-wrap" {...handlers}>
-          <div className="message-bubble">{messageContent(message)}</div>
+          <div className="message-bubble">{displayedText}</div>
+          {showTranslationBar && (
+            <div className="message-translation-bar">
+              {/* Queued and in-flight are shown apart on purpose: a full
+                  concurrency gate and a slow backend look identical
+                  otherwise, and only one of them is a problem. */}
+              {translation.status === 'queued' && (
+                <span className="message-translation-status">Queued…</span>
+              )}
+              {translation.status === 'loading' && (
+                <span className="message-translation-status">Translating…</span>
+              )}
+              {translation.status === 'failed' && (
+                <span className="message-translation-status message-translation-error">
+                  Translation failed
+                </span>
+              )}
+              {isShowingTranslation ? (
+                <button
+                  type="button"
+                  className="message-translation-toggle"
+                  onClick={() => revert(message, room?.id)}
+                >
+                  See original
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="message-translation-toggle"
+                  disabled={translation.status === 'queued' || translation.status === 'loading'}
+                  onClick={() => translate(message, room?.id)}
+                >
+                  Translate
+                </button>
+              )}
+            </div>
+          )}
           {hovered && (
             <div className="message-actions-host" {...handlers}>
               <MessageActions

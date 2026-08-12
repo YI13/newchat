@@ -205,3 +205,34 @@
   transition: background var(--motion-fast) var(--easing);
 }
 .message-reply-badge:hover { background: var(--accent-soft-hover); }
+
+/* Translation control sits under the bubble, inside the bubble wrap, so it
+   shares the hover region with the action toolbar. */
+.message-translation-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  margin-top: var(--space-2xs);
+  font-size: var(--text-xs);
+}
+
+.message-translation-toggle {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font-size: var(--text-xs);
+  font-weight: var(--font-medium);
+  cursor: pointer;
+}
+
+.message-translation-toggle:hover:not(:disabled) { text-decoration: underline; }
+
+.message-translation-toggle:disabled {
+  color: var(--text-secondary);
+  cursor: default;
+}
+
+.message-translation-status { color: var(--text-secondary); }
+
+.message-translation-error { color: var(--text-error); }
