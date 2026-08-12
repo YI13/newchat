@@ -29,6 +29,7 @@
 | `09-error-notices.md` | **要讓手動翻譯在後端限流 / 不可用時提示使用者時** | 功能包:`too_many_requests` / `unavailable` 兩個 code 的提示。四步實作、六條測試,全含程式碼 |
 | `10-suspend-tracker.md` | **要在自動翻譯關閉時停掉可見度追蹤時** | 效能包:暫停(不是銷毀)可見度追蹤。兩個先決問題、兩條路線、七條測試,全含程式碼 |
 | `11-entry-map-growth.md` | **長時間開著的分頁記憶體持續上升時** | 效能包:entry map 的有界淘汰(Zustand + Record 寫法)。三步修正、六條測試,全含程式碼 |
+| `12-sweep-memoisation.md` | **修復掃描每秒重複印同樣的 skip 時** | 效能包:記憶化掃描已定案的答案。四步修正、六條測試,全含程式碼 |
 
 ## 相位總覽
 
@@ -89,7 +90,12 @@ Phase A 只換觀察器。如果症狀在 A 之後就消失大半,你就知道�
    程式碼依賴了它。自己維護一個 `Set` 當順序表,並且淘汰要有遲滯 —— 每次寫入就淘汰
    一筆會讓 Record 每次都重建。實作包在 `11-entry-map-growth.md`。
 
-11. **不要把翻譯的錯誤文案掛在 `reason` 上。** 全域的 reason 文案表是所有服務共用的,
+11. **記憶化修復掃描的結果時,不要只用 message id 當鍵。** 訊息可以被編輯,而
+   `non-textual` 是 `(id, 修訂版本)` 的性質不是 id 的性質 —— 一則貼圖被編輯成有文字
+   就變成可翻譯,而編輯處理路徑把 entry 設回 idle 正是為了讓掃描重新接手。只用 id
+   的 memo 會把那個機制吞掉,而且不會報錯。實作包在 `12-sweep-memoisation.md`。
+
+12. **不要把翻譯的錯誤文案掛在 `reason` 上。** 全域的 reason 文案表是所有服務共用的,
    而 `upstream_unavailable` 已經被 auth-service / portal-service 使用 —— 加一筆
    「翻譯服務無法使用」會改寫它們的錯誤。以 `code` 為鍵、放在翻譯自己的模組裡。
    實作包在 `09-error-notices.md`。
