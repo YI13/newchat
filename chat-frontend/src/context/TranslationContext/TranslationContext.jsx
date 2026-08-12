@@ -11,6 +11,7 @@ import {
 import { translateText } from '@/api'
 import { createTranslateTextStub } from '@/api/translateText/stub'
 import { useNats } from '@/context/NatsContext'
+import { useToast } from '@/context/ToastContext'
 import { translationCache } from '@/lib/idbTranslationCache'
 import {
   DEFAULT_AUTO_TRANSLATE,
@@ -29,6 +30,7 @@ import { AUTO_TRANSLATE_CONFIG, createAutoPolicy } from './autoPolicy'
 import { DECISION, createDecisionLog } from './decisionLog'
 import { checkInvariants } from './invariants'
 import { IDLE_ENTRY, createTranslationStore } from './store'
+import { translationErrorToast } from './translationErrorCopy'
 import { createVisibilityObserver } from './visibilityObserver'
 
 /** How often the queue is audited against its own guarantees. Frequent enough
@@ -97,6 +99,10 @@ export function TranslationProvider({ children, translate, cache }) {
       dwellMs: AUTO_TRANSLATE_CONFIG.dwellMs,
       prefetchMarginPx: AUTO_TRANSLATE_CONFIG.prefetchMarginPx,
       log,
+      // Built in whatever state the setting is already in, so a session that
+      // starts with the switch off never runs a single intersection callback.
+      // The effect below keeps it in step from here on.
+      enabled: autoTranslate,
       onCandidate: (id) => {
         candidateId = id
         policy?.onCandidate(id)
@@ -144,12 +150,29 @@ export function TranslationProvider({ children, translate, cache }) {
 
     const snapshot = () => ({
       ...createdStore.inspect(),
+      // Reported so an empty visibleIds against a full registeredIds reads as
+      // "suspended" rather than as the registry going blind — the two look
+      // identical from outside, and only one of them is a fault.
+      trackerEnabled: observer.isEnabled(),
       visibleIds: [...observer.visibleIds],
       registeredIds: observer.registeredIds(),
     })
 
     return { store: createdStore, auto: { policy, observer, log, snapshot } }
   })
+
+  // Nothing downstream of the tracker does any work while the switch is off —
+  // the policy skips at its first gate — so watching at all is pure cost:
+  // an intersection callback per scroll and a dwell timer per row, for
+  // candidates that are all discarded. Suspending stops that at the source.
+  //
+  // Suspend, never destroy. The registry belongs to the mounted rows, and
+  // flipping the switch back on re-renders none of them — a resume that had
+  // to wait for a re-mount would leave the tracker watching nothing, which is
+  // exactly how automatic translation dies silently.
+  useEffect(() => {
+    auto.observer.setEnabled(autoTranslate)
+  }, [auto, autoTranslate])
 
   // A backgrounded tab must not keep translating, and on return the viewport
   // is re-evaluated rather than resuming a queue built for a screen the user
@@ -233,6 +256,7 @@ export function TranslationProvider({ children, translate, cache }) {
       if (!element) {
         registryRef.current.delete(message.id)
         auto.observer.unobserve(message.id)
+        auto.policy.forget(message.id)
         store.detach(message.id)
         return
       }
@@ -356,24 +380,46 @@ export function useTranslationActions() {
   const ctx = useOptionalTranslation()
   const store = ctx?.store
   const targetLang = ctx?.targetLang
+  const { show } = useToast()
 
   const translate = useCallback(
     (message, roomId) => {
       if (!store) return Promise.resolve()
-      return store.translate(message.id, {
-        roomId,
-        text: message.content ?? message.msg ?? '',
-        targetLang,
-        srcVersion: message.editedAt ?? 0,
-        origin: 'manual',
-      })
+      return store
+        .translate(message.id, {
+          roomId,
+          text: message.content ?? message.msg ?? '',
+          targetLang,
+          srcVersion: message.editedAt ?? 0,
+          origin: 'manual',
+        })
+        .then((outcome) => {
+          // The user just answered the question the sweep had memoised. Both
+          // buttons do this: Translate overrides an 'off' intent, See original
+          // creates one.
+          ctx?.auto?.policy?.forget(message.id)
+          // The store settles rather than throws, so this is the only place
+          // the outcome is visible — and it is deliberately the manual one.
+          // Automatic failures stay silent: nobody asked for them, and a
+          // single down backend would otherwise raise one notice per message
+          // on screen. An abort is the user's own doing (see original, a new
+          // request superseding this one) and says nothing about the service.
+          if (outcome && !outcome.ok && !outcome.aborted) {
+            show(translationErrorToast(outcome.error))
+          }
+          return outcome
+        })
     },
-    [store, targetLang],
+    [store, targetLang, show],
   )
 
   const revert = useCallback(
-    (message, roomId) => (store ? store.revert(message.id, roomId) : Promise.resolve()),
-    [store],
+    (message, roomId) => {
+      if (!store) return Promise.resolve()
+      ctx?.auto?.policy?.forget(message.id)
+      return store.revert(message.id, roomId)
+    },
+    [store, ctx],
   )
 
   return { available: !!store, translate, revert }

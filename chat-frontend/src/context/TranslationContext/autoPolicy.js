@@ -101,6 +101,49 @@ export function createAutoPolicy({
   let probing = false
 
   /**
+   * Messages the sweep has already answered for, as id -> the revision the
+   * answer was given at.
+   *
+   * The sweep re-offers every idle visible message once a second, which is
+   * what repairs a message stranded by a full queue. But for one that can
+   * never be translated the answer is the same every time, and re-deriving it
+   * costs a store read, the whole rule chain and a log line — per message, per
+   * second, for as long as it stays on screen. A reverted message costs an
+   * IndexedDB read on top of that.
+   *
+   * Keyed by revision, not by id alone: an edit can change the answer. A
+   * sticker edited to add words becomes translatable, and the store sets its
+   * entry back to idle precisely so the sweep picks it up again — an id-keyed
+   * memo would swallow that, and the message would never translate for as long
+   * as it stayed mounted.
+   */
+  const answered = new Map()
+
+  /** Only these can be settled from the message alone. `unknown-message` must
+   *  never join them: a message can be missing for a moment while the list is
+   *  still filling in, and memoising that strands it. */
+  const PERMANENT_SKIPS = new Set([SKIP.NonTextual, SKIP.OwnMessage, SKIP.SystemMessage])
+
+  const revisionOf = (message) => message?.editedAt ?? 0
+
+  function remember(messageId, message) {
+    if (message) answered.set(messageId, revisionOf(message))
+  }
+
+  function isAnswered(messageId) {
+    const at = answered.get(messageId)
+    if (at === undefined) return false
+    const message = getMessage(messageId)
+    // Gone from the index, or edited since: either way the old answer no
+    // longer applies and the message goes back through the gates.
+    if (!message || revisionOf(message) !== at) {
+      answered.delete(messageId)
+      return false
+    }
+    return true
+  }
+
+  /**
    * Pure predicate — deliberately. An earlier version claimed the probe token
    * here, in the same expression that tested for it. Every path that returned
    * between the test and the request then kept a token nothing would ever give
@@ -196,7 +239,10 @@ export function createAutoPolicy({
     const message = getMessage(messageId)
     for (const rule of rules) {
       const reason = rule(message, ctx)
-      if (reason) return skip(reason)
+      if (reason) {
+        if (PERMANENT_SKIPS.has(reason)) remember(messageId, message)
+        return skip(reason)
+      }
     }
 
     if (circuitBlocks()) {
@@ -223,6 +269,12 @@ export function createAutoPolicy({
     // them would throttle the cheapest paths hardest.
     if (result?.outcome !== 'queued') {
       probing = false
+      // 'suppressed' here is always intent === 'off' — the auto-off branch
+      // cannot be reached, since offerCandidate has already refused when the
+      // switch is off. Reaching it costs an IndexedDB read, and the answer
+      // only changes when the user presses Translate or See original, both of
+      // which call forget().
+      if (result?.outcome === 'suppressed') remember(messageId, message)
       return result ?? {}
     }
 
@@ -300,6 +352,10 @@ export function createAutoPolicy({
     if (circuitBlocks() || rateLimited()) return
 
     for (const id of ids) {
+      // Before the store read, not after: recognising an id the gates have
+      // already settled is a Map lookup, and it is the whole point of the memo
+      // that this loop stops touching anything for those messages.
+      if (isAnswered(id)) continue
       if (store.getEntry(id).status !== 'idle') continue
       // Fire-and-forget: onCandidate resolves when the translation SETTLES,
       // so awaiting it here would repair one message per tick instead of one
@@ -313,6 +369,10 @@ export function createAutoPolicy({
     config: cfg,
     onCandidate,
     recheckVisible,
+    /** Drop a memoised answer. Called when the user changes it (Translate /
+     *  See original) and when the row unmounts, which bounds the map to what
+     *  is currently on screen. */
+    forget: (messageId) => answered.delete(messageId),
     // The circuit governs background work only. Manual requests never reach
     // this module; the flag keeps that a stated contract.
     gatesManualRequests: false,

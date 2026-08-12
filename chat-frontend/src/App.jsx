@@ -3,6 +3,7 @@ import { NatsProvider, useNats } from '@/context/NatsContext'
 import { RoomKeysProvider } from '@/context/RoomKeysContext'
 import { RoomEventsProvider } from '@/context/RoomEventsContext'
 import { ThreadEventsProvider } from '@/context/ThreadEventsContext'
+import { ToastProvider } from '@/context/ToastContext'
 import { TranslationProvider } from '@/context/TranslationContext'
 import LoginPage from '@/pages/LoginPage'
 import MainApp from '@/components/MainApp/MainApp'
@@ -78,9 +79,13 @@ export default function App() {
   // initial render (e.g. a malformed runtime config) also caught.
   return (
     <ErrorBoundary>
-      <NatsProvider>
-        <AppContent />
-      </NatsProvider>
+      {/* Outside NatsProvider so the login screens can raise notices too, and
+          so a toast survives the re-render that connecting causes. */}
+      <ToastProvider>
+        <NatsProvider>
+          <AppContent />
+        </NatsProvider>
+      </ToastProvider>
     </ErrorBoundary>
   )
 }
